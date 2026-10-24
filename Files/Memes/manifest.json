@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "qq_face_0",
+      "file": "",
+      "tags": [
+        "\u5FAE\u7B11",
+        "\u53CB\u597D",
+        "\u95EE\u5019"
+      ],
+      "faceId": 0
+    },
+    {
+      "id": "qq_face_4",
+      "file": "",
+      "tags": [
+        "\u5F97\u610F",
+        "\u5F00\u5FC3",
+        "\u81EA\u8C6A"
+      ],
+      "faceId": 4
+    },
+    {
+      "id": "qq_face_5",
+      "file": "",
+      "tags": [
+        "\u6D41\u6CEA",
+        "\u96BE\u8FC7",
+        "\u59D4\u5C48"
+      ],
+      "faceId": 5
+    },
+    {
+      "id": "qq_face_6",
+      "file": "",
+      "tags": [
+        "\u5BB3\u7F9E",
+        "\u4E0D\u597D\u610F\u601D"
+      ],
+      "faceId": 6
+    },
+    {
+      "id": "qq_face_13",
+      "file": "",
+      "tags": [
+        "\u5472\u7259",
+        "\u5F00\u5FC3",
+        "\u7B11"
+      ],
+      "faceId": 13
+    },
+    {
+      "id": "qq_face_14",
+      "file": "",
+      "tags": [
+        "\u60CA\u8BB6",
+        "\u5403\u60CA",
+        "\u4E0D\u6562\u76F8\u4FE1"
+      ],
+      "faceId": 14
+    },
+    {
+      "id": "qq_face_66",
+      "file": "",
+      "tags": [
+        "\u7231\u5FC3",
+        "\u559C\u6B22",
+        "\u5173\u5FC3"
+      ],
+      "faceId": 66
+    },
+    {
+      "id": "qq_face_76",
+      "file": "",
+      "tags": [
+        "\u8D5E",
+        "\u8D5E\u540C",
+        "\u9F13\u52B1"
+      ],
+      "faceId": 76
+    },
+    {
+      "id": "qq_face_79",
+      "file": "",
+      "tags": [
+        "\u80DC\u5229",
+        "\u6210\u529F",
+        "\u5E86\u795D"
+      ],
+      "faceId": 79
+    },
+    {
+      "id": "qq_face_99",
+      "file": "",
+      "tags": [
+        "\u9F13\u638C",
+        "\u795D\u8D3A",
+        "\u8D5E\u8D4F"
+      ],
+      "faceId": 99
+    },
+    {
+      "id": "miku_01",
+      "file": "miku_01.png",
+      "tags": [
+        "\u795E\u5723"
+      ]
+    },
+    {
+      "id": "miku_02",
+      "file": "miku_02.jpg",
+      "tags": [
+        "\u4E0D\u6EE1"
+      ]
+    },
+    {
+      "id": "miku_03",
+      "file": "miku_03.jpg",
+      "tags": [
+        "\u5BB3\u7F9E",
+        "\u4E0D\u597D\u610F\u601D"
+      ]
+    }
+  ]
+}

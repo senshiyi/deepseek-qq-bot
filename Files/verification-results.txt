@@ -1,0 +1,16 @@
+PASS replacement waits for cancelled player cleanup
+PASS stop cancels output and dispose is idempotent
+PASS mute stops current output and never resumes old data
+PASS playback device failure is observed and next output can recover
+PASS simultaneous start requests retain one active device owner
+PASS session deadline cancels audio independently of the command loop
+PASS cancelled generation cannot enqueue late audio
+PASS output queue stays bounded and preserves aligned PCM
+PASS drained completed queue returns EOF
+PASS fixed tone is bounded and has finite nonzero energy
+PASS signal meter distinguishes silence from PCM speech-like energy
+PASS invalid gain and duration are rejected
+PASS probe rejects out-of-range duration before opening hardware
+PASS probe rejects unsafe scheduled tone positions before opening hardware
+PASS pre-cancelled diagnostics never open hardware
+15/15 passed. No hardware opened; no QQ audio recorded or transmitted.

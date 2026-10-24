@@ -1,0 +1,149 @@
+{
+  "Source": "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip",
+  "DownloadedAt": "2026-10-19T09:45:53.8125358+08:00",
+  "ArchiveSHA256": "B950E39F01AF1D04EA623C8F6D8EB9B6EA5C477C637295FABF20631C85116BFB",
+  "Files": [
+    {
+      "Name": "vbaudio_cable_2003.cat",
+      "SHA256": "23A10E3BCD6FFE0DE6D3D67830BE4C447724B3299E13E954DD6BD2257CF55DA1",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable_2003.sys",
+      "SHA256": "9650E20C38429D4680A7E603ECBE6601914EC4C94F8473112F21515BF53B84CF",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable_vista.cat",
+      "SHA256": "810B30193A400B1559302C23F81EF8AAADF038B3CAF3AFF9BF200B59688A2DEF",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable_vista.sys",
+      "SHA256": "8B02C26313B75CEB8FB9BD16B6B167CF70D7F3BC977DFC1986C0859F8C72B49F",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable_win7.cat",
+      "SHA256": "1C38AFACF115818C925BC26FAF216E3563E85BBC4D6D793E5F76F2AA670D08E7",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable_win7.sys",
+      "SHA256": "D047E3EE66E3EE023E598232EA22AA28DBB39ADEABE818ADFB2A72AB738DF0B9",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable_xp.cat",
+      "SHA256": "51434EBBDA13CAF3C7617EF3035126BAACCA3E523FEAF6828B398D52503D70D2",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable_xp.sys",
+      "SHA256": "9F9BC80A96CC94C761887749E51D9B4FB7EE6741CE624B8B2F9F85CD2E3FB02E",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable64_2003.cat",
+      "SHA256": "70F88E34C857C999367EB5B0303E23F5676B15A79ED4054F374749232BAA0E3A",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable64_2003.sys",
+      "SHA256": "5A726F3F1616F587C9F118BF337FD359DF3F7CB9FC967A14229D59A31F2A9720",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable64_vista.cat",
+      "SHA256": "CC17731E91F2F071E4A108BBA34A2B8DCB69EA5975F4B9C39FCBC670E5CF15FB",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable64_vista.sys",
+      "SHA256": "703572FA9E8AA1616E6B2ABD36B91A4718DE77EADC02AE05ED2C8F304D058AFC",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable64_win10.cat",
+      "SHA256": "0A921EBADBE39CF3FA7C14FF37D1CA22565A9651244BD3AC177DC810BC99072E",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Microsoft Windows Hardware Compatibility Publisher, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+      "Issuer": "CN=Microsoft Windows Third Party Component CA 2014, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+    },
+    {
+      "Name": "vbaudio_cable64_win10.sys",
+      "SHA256": "F01344602472F1B527DE5EE98F18987C03DB48FEA444E457D061E937F1D531D5",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=BUREL VINCENT Entrepreneur individuel, O=BUREL VINCENT Entrepreneur individuel, STREET=21 avenue des Marguerites, L=Eymet, S=Dordogne, C=FR, OID.1.3.6.1.4.1.311.60.2.1.3=FR, SERIALNUMBER=423 734 177, OID.2.5.4.15=Private Organization",
+      "Issuer": "CN=GlobalSign GCC R45 EV CodeSigning CA 2020, O=GlobalSign nv-sa, C=BE"
+    },
+    {
+      "Name": "vbaudio_cable64_win7.cat",
+      "SHA256": "800B541F06BBA3925BA058E7CC7CA837CFD4D845E073309EB2A9D36A2626403A",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable64_win7.sys",
+      "SHA256": "C7F3BE383C81AB9AA642479F95872E40E19A4CFD72D4C8D7DE80ABC11B713E21",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=Vincent Burel, OU=Individual Developer, OU=Digital ID Class 3 - Microsoft Software Validation v2, O=No Organization Affiliation, L=Eymet, S=Dordogne, C=FR",
+      "Issuer": "CN=VeriSign Class 3 Code Signing 2010 CA, OU=Terms of use at https://www.verisign.com/rpa (c)10, OU=VeriSign Trust Network, O=\"VeriSign, Inc.\", C=US"
+    },
+    {
+      "Name": "vbaudio_cable64arm_win10.sys",
+      "SHA256": "2DC35DB3DFAD0F25771A3E59AF38E8B1268878EBE127476EA75FEE109F2927DD",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=BUREL VINCENT Entrepreneur individuel, O=BUREL VINCENT Entrepreneur individuel, STREET=21 avenue des Marguerites, L=Eymet, S=Dordogne, C=FR, OID.1.3.6.1.4.1.311.60.2.1.3=FR, SERIALNUMBER=423 734 177, OID.2.5.4.15=Private Organization",
+      "Issuer": "CN=GlobalSign GCC R45 EV CodeSigning CA 2020, O=GlobalSign nv-sa, C=BE"
+    },
+    {
+      "Name": "VBCABLE_ControlPanel.exe",
+      "SHA256": "F5B44706FE7BA2EED0516DEE791F826DC7A9891E997F6CE9704E2899300B14FF",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=BUREL VINCENT Entrepreneur individuel, O=BUREL VINCENT Entrepreneur individuel, STREET=21 avenue des Marguerites, L=Eymet, S=Dordogne, C=FR, OID.1.3.6.1.4.1.311.60.2.1.3=FR, SERIALNUMBER=423 734 177, OID.2.5.4.15=Private Organization",
+      "Issuer": "CN=GlobalSign GCC R45 EV CodeSigning CA 2020, O=GlobalSign nv-sa, C=BE"
+    },
+    {
+      "Name": "VBCABLE_Setup_x64.exe",
+      "SHA256": "734C35DFA6D98F48782A451633CEB471166EC70D60482FD89A1123D0EE3C4F41",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=BUREL VINCENT Entrepreneur individuel, O=BUREL VINCENT Entrepreneur individuel, STREET=21 avenue des Marguerites, L=Eymet, S=Dordogne, C=FR, OID.1.3.6.1.4.1.311.60.2.1.3=FR, SERIALNUMBER=423 734 177, OID.2.5.4.15=Private Organization",
+      "Issuer": "CN=GlobalSign GCC R45 EV CodeSigning CA 2020, O=GlobalSign nv-sa, C=BE"
+    },
+    {
+      "Name": "VBCABLE_Setup.exe",
+      "SHA256": "01FFC86B623FF3C75A883AA900C0215A89482988E1C8E55988FC0A9FB513DBED",
+      "SignatureStatus": "Valid",
+      "Subject": "CN=BUREL VINCENT Entrepreneur individuel, O=BUREL VINCENT Entrepreneur individuel, STREET=21 avenue des Marguerites, L=Eymet, S=Dordogne, C=FR, OID.1.3.6.1.4.1.311.60.2.1.3=FR, SERIALNUMBER=423 734 177, OID.2.5.4.15=Private Organization",
+      "Issuer": "CN=GlobalSign GCC R45 EV CodeSigning CA 2020, O=GlobalSign nv-sa, C=BE"
+    }
+  ],
+  "Executed": false,
+  "Installed": false
+}

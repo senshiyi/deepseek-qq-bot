@@ -1,0 +1,19 @@
+{
+  "oneBotBaseUrl": "http://127.0.0.1:3000/",
+  "eventPort": 17801,
+  "selfId": 0,
+  "allowedGroupIds": [123456789],
+  "allowedPrivateUserIds": [],
+  "privateIntervalSeconds": 8,
+  "privatePerHour": 30,
+  "mentionIntervalSeconds": 8,
+  "mentionPerHour": 30,
+  "activeIntervalSeconds": 120,
+  "activePerHour": 6,
+  "activeMessageEvery": 3,
+  "activeGroupId": 0,
+  "botNames": ["小深", "机器人"],
+  "mode": "mention",
+  "engine": "deepseek",
+  "memeDirectory": "Files/Memes"
+}

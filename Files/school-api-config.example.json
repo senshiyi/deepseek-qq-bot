@@ -1,0 +1,10 @@
+{
+  "baseUrl": "https://myai.bupt.edu.cn/llm-gw/v1/",
+  "model": "",
+  "inputPointsPerMillion": null,
+  "outputPointsPerMillion": null,
+  "maxPoints": null,
+  "maxCalls": null,
+  "stream": false,
+  "visionModel": "qwen3.8-27b"
+}

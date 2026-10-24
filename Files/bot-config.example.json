@@ -1,0 +1,13 @@
+{
+  "modelDirectory": "Models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23",
+  "name": "小深",
+  "voice": "Microsoft Huihui Desktop",
+  "speechRate": 0,
+  "apiBudgetYuan": 0.30,
+  "maxApiCalls": 10,
+  "logTranscripts": false,
+  "imageEventsEnabled": false,
+  "oneBotPort": 17800,
+  "oneBotSelfId": null,
+  "fixedReply": "我听到了。现在是本地语音通路测试。"
+}
