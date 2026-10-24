@@ -1,0 +1,49 @@
+{
+  "verifiedAt": "2026-10-24T11:21:21.9585866+08:00",
+  "baselineCommit": "9de34c319a79668bb1265155ac0e13677cdae91b",
+  "sourceCommit": "d5f9f91f464bd1749cb6a20b4cd3a2c705e72cec",
+  "fullSuites": {
+    "total": 49,
+    "passed": 49,
+    "scope": "Full regression before final InvalidDataException filter fix; affected admin suites rerun after fix",
+    "log": "Cache/maintenance-final-checks.log"
+  },
+  "finalAffectedAdmin": {
+    "total": 9,
+    "passed": 9,
+    "log": "Cache/maintenance-affected-admin.log"
+  },
+  "finalCompanion": {
+    "log": "Cache/maintenance-companion-parser-green.log",
+    "passed": 20
+  },
+  "adminWeb": {
+    "passed": 8,
+    "failed": 0,
+    "log": "Cache/maintenance-final-checks.log"
+  },
+  "launcher": {
+    "passed": 4
+  },
+  "release": {
+    "id": "20261024-031733-78984ddc",
+    "createdAt": "2026-10-24T11:17:37.8619561+08:00",
+    "sourceCommit": "d5f9f91f464bd1749cb6a20b4cd3a2c705e72cec",
+    "sourceDirty": false,
+    "assemblySha256": "ED96E161B788CCD95F0971ABB14DDF42382E1D7D4613FB84E4D73AD21A8C0530",
+    "executableSha256": "78FDF721ED18F032E4E24514E88328FAC159754EEFDEB14E168835380BD64E9B"
+  },
+  "releaseSelectedForNextStart": true,
+  "existingProcessRestarted": false,
+  "originalAssemblySha256": "864CAB240A3725007A97D611AD411DF9B08E39D31BFEFA9E67219F29224B56FF",
+  "realQqMessagesSent": false,
+  "paidModelsCalled": false,
+  "audioHardwareOpened": false,
+  "browser": {
+    "previewClosed": true,
+    "report": "Cache/maintenance-browser-report.md",
+    "port17812Released": true,
+    "passed": true,
+    "syntheticDataOnly": true
+  }
+}
