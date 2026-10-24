@@ -3,6 +3,7 @@ param([string]$Group,[string]$ProjectRoot,[switch]$Background)
 $ErrorActionPreference='Stop'
 if([string]::IsNullOrWhiteSpace($ProjectRoot)){$ProjectRoot=Split-Path -Parent $PSScriptRoot}
 $ProjectRoot=(Resolve-Path -LiteralPath $ProjectRoot).Path
+Import-Module (Join-Path $PSScriptRoot 'BridgeBuild.psm1') -Force
 $launchLock=$null
 $locationPushed=$false
 function Read-PositiveId($Value){
@@ -61,6 +62,7 @@ function Request-ExistingChatReload {
     }catch{return $false}
 }
 function Test-ConfiguredLogin([int]$TimeoutMilliseconds=6000){
+    if([string]::IsNullOrWhiteSpace($bridgePath)){return $false}
     $start=New-Object Diagnostics.ProcessStartInfo
     $start.FileName=$bridgePath
     $start.Arguments='chat-check --chat-config "'+$chatPath+'"'
@@ -104,15 +106,16 @@ try{
     $eventPort=17801
     if($null -ne $settings.eventPort){$eventPort=[int]$settings.eventPort}
     if($eventPort -lt 1024 -or $eventPort -gt 65535){throw '群事件端口必须为 1024～65535。'}
-    $projectPath=Join-Path $ProjectRoot 'Files\AudioBridge\AudioBridge.csproj'
-    $framework=([xml](Get-Content -LiteralPath $projectPath -Raw -Encoding UTF8)).Project.PropertyGroup.TargetFramework
-    $bridgePath=Join-Path $ProjectRoot ('Files\AudioBridge\bin\Release\'+$framework+'\AudioBridge.exe')
     $existing=Get-ExistingChatState
     if($null -ne $existing){
+        $bridgePath=$null
+        try{$bridgePath=Resolve-BridgeExecutable $ProjectRoot}
+        catch{Write-Host '待启动版本暂不可用；保留已运行宿主并打开面板，跳过独立账号检查。' -ForegroundColor Yellow}
         if($existing.runtime.running){
             $pauseLabel=if($existing.runtime.paused){'（当前已暂停）'}else{''}
             Write-Host ('本项目消息监听宿主已在后台运行'+$pauseLabel+'，无需重复启动。当前群：'+$existing.runtime.groupId)
-            if(Test-ConfiguredLogin){Write-Host 'QQ在线状态及NapCat账号检查通过；实际收发情况请查看面板最近事件和QQ回复。'}
+            if(-not $bridgePath){Write-Host '当前宿主状态请以管理面板为准。'}
+            elseif(Test-ConfiguredLogin){Write-Host 'QQ在线状态及NapCat账号检查通过；实际收发情况请查看面板最近事件和QQ回复。'}
             else{Write-Host 'NapCat账号接口当前不可用，消息宿主存活不代表能收发。请启动本项目NapCat并完成登录；现有宿主保留，不重复启动。' -ForegroundColor Yellow}
         }else{
             if((Test-ConfiguredLogin) -and (Request-ExistingChatReload)){Write-Host '管理宿主仍在，NapCat账号接口已恢复，已请求重新装载消息会话；请在面板核对完成状态。'}
@@ -122,6 +125,7 @@ try{
         & (Join-Path $PSScriptRoot 'Open-Panel.ps1') -ProjectRoot $ProjectRoot
         exit 0
     }
+    $bridgePath=Resolve-BridgeExecutable $ProjectRoot
     Assert-EventPortFree $eventPort
     $local=Join-Path $ProjectRoot 'Results\local'
     [void][IO.Directory]::CreateDirectory($local)
@@ -129,13 +133,7 @@ try{
     catch{throw '本项目的群聊启动入口已打开，或启动锁无法取得；请先查看现有窗口。'}
     Push-Location -LiteralPath $ProjectRoot
     $locationPushed=$true
-    Write-Host '正在编译并检查现有群消息入口……'
-    & (Join-Path $ProjectRoot 'start.cmd') help | Out-Null
-    if($LASTEXITCODE -ne 0){throw '现有 start.cmd 编译检查失败，未启动群聊。'}
-    $projectPath=Join-Path $ProjectRoot 'Files\AudioBridge\AudioBridge.csproj'
-    $framework=([xml](Get-Content -LiteralPath $projectPath -Raw)).Project.PropertyGroup.TargetFramework
-    $bridgePath=Join-Path $ProjectRoot ('Files\AudioBridge\bin\Release\'+$framework+'\AudioBridge.exe')
-    if(-not (Test-Path -LiteralPath $bridgePath)){throw '编译后未找到 AudioBridge.exe，未启动群聊。'}
+    if(-not (Test-Path -LiteralPath $bridgePath)){throw '未找到选定发布版本，未启动群聊。'}
     Write-Host 'NapCat 必须在线并登录配置账号。最长等待 180 秒；扫码或其他验证请在 NapCat 窗口手动完成。'
     $deadline=[DateTimeOffset]::UtcNow.AddSeconds(180)
     $loginStarted=Get-Date

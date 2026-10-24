@@ -111,14 +111,34 @@ public static class CompanionJournal
         }
     }
 
+    /// <summary>只选取能完整进入一次模型请求的前缀；调用方按末条消息保存进度。</summary>
+    public static IReadOnlyList<StoredPrivateMessage> BuildBatch(IReadOnlyList<StoredPrivateMessage> messages)
+    {
+        var batch = new List<StoredPrivateMessage>();
+        var characters = 0;
+        foreach (var message in messages)
+        {
+            var length = SourceLine(message).Length;
+            if (length > MaximumSourceCharacters)
+                throw new InvalidDataException("单条日记材料超过允许长度，未推进整理进度。");
+            if (characters + length > MaximumSourceCharacters) break;
+            batch.Add(message);
+            characters += length;
+        }
+        return batch;
+    }
+
+    private static string SourceLine(StoredPrivateMessage message) =>
+        (message.Role == "user" ? "用户：" : "助手：") + message.Text.Trim() + "\n";
+
     private static string BuildSource(IReadOnlyList<StoredPrivateMessage> messages)
     {
         var builder = new StringBuilder();
-        foreach (var message in messages.Where(item => item is not null && !string.IsNullOrWhiteSpace(item.Text))
-                     .OrderBy(item => item.At))
+        foreach (var message in messages)
         {
-            var line = (message.Role == "user" ? "用户：" : "助手：") + message.Text.Trim() + "\n";
-            if (builder.Length + line.Length > MaximumSourceCharacters) break;
+            var line = SourceLine(message);
+            if (builder.Length + line.Length > MaximumSourceCharacters)
+                throw new InvalidDataException("日记材料必须先分批，未推进整理进度。");
             builder.Append(line);
         }
         return builder.ToString();

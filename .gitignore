@@ -15,6 +15,7 @@ bot-profile.local.json
 bot-profile.local.*.tmp
 group-chat.local.json.*.tmp
 companion.local.json
+*.local.json
 *.local.json.*.tmp
 *.db
 *.db-shm

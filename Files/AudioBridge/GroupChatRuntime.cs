@@ -206,47 +206,47 @@ public static class GroupChatRuntime
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException or TimeoutException)
             { Write("memory_archive_failed", new { type = error.GetType().Name }); }
         }
-        var companionTask = contacts is null ? null : Task.Run(async () =>
+        var companionHealth = contacts is null ? null : new BackgroundTaskMonitor("companion", Write, timeProvider);
+        var connectionHealth = live ? new BackgroundTaskMonitor("onebot-health", Write, timeProvider) : null;
+        var listenerHealth = new BackgroundTaskMonitor("message-listener", Write, timeProvider);
+        var workerHealth = new BackgroundTaskMonitor("message-worker", Write, timeProvider);
+        BackgroundTaskSnapshot[] BackgroundSnapshot() => new[] { listenerHealth, workerHealth, connectionHealth, companionHealth }
+            .OfType<BackgroundTaskMonitor>().Select(task => task.Snapshot()).ToArray();
+        var companionTask = contacts is null ? null : Task.Run(() => companionHealth!.RunAsync(async token =>
         {
-            try
-            {
-                var engineReply = new CompanionRuntime(companions, contacts, persona ?? new PersonaSettings(), ModelReply,
-                    () => policy.Snapshot(), DeliverCompanionAsync, settings.AllowedPrivateUserIds, live, Write, timeProvider);
-                await engineReply.RunAsync(lifetime.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
-        });
+            var engineReply = new CompanionRuntime(companions, contacts, persona ?? new PersonaSettings(), ModelReply,
+                () => policy.Snapshot(), DeliverCompanionAsync, settings.AllowedPrivateUserIds, live, Write, timeProvider,
+                companionHealth.Report);
+            await engineReply.RunAsync(token).ConfigureAwait(false);
+        }, lifetime.Token));
         var connection = new OneBotConnection(live ? "checking" : "preview");
-        var health = Task.Run(async () =>
+        var health = connectionHealth is null ? Task.CompletedTask : Task.Run(() => connectionHealth.RunAsync(async token =>
         {
-            if (!live) return;
-            try
+            while (!token.IsCancellationRequested)
             {
-                while (!lifetime.IsCancellationRequested)
+                try
                 {
-                    try
+                    var status = await client.GetStatusAsync(token).ConfigureAwait(false);
+                    var state = "offline";
+                    if (status.Online && status.Good)
                     {
-                        var status = await client.GetStatusAsync(lifetime.Token).ConfigureAwait(false);
-                        var state = "offline";
-                        if (status.Online && status.Good)
-                        {
-                            var currentAccount = await client.GetLoginInfoAsync(lifetime.Token).ConfigureAwait(false);
-                            state = currentAccount == self.ToString(CultureInfo.InvariantCulture) ? "connected" : "account_changed";
-                        }
-                        if (state != "connected") schedules?.NotifyOffline();
-                        Volatile.Write(ref connection, new(state, DateTimeOffset.UtcNow));
+                        var currentAccount = await client.GetLoginInfoAsync(token).ConfigureAwait(false);
+                        state = currentAccount == self.ToString(CultureInfo.InvariantCulture) ? "connected" : "account_changed";
                     }
-                    catch (OneBotMessageException error)
-                    {
-                        if (lifetime.IsCancellationRequested) break;
-                        schedules?.NotifyOffline();
-                        Volatile.Write(ref connection, new("unavailable", DateTimeOffset.UtcNow, error.GetType().Name));
-                    }
-                    await Task.Delay(TimeSpan.FromSeconds(30), lifetime.Token).ConfigureAwait(false);
+                    if (state != "connected") schedules?.NotifyOffline();
+                    Volatile.Write(ref connection, new(state, DateTimeOffset.UtcNow));
+                    connectionHealth.Report(state == "connected" ? null : new InvalidOperationException("账号未就绪。"));
                 }
+                catch (OneBotMessageException error)
+                {
+                    if (token.IsCancellationRequested) break;
+                    schedules?.NotifyOffline();
+                    Volatile.Write(ref connection, new("unavailable", DateTimeOffset.UtcNow, error.GetType().Name));
+                    connectionHealth.Report(error);
+                }
+                await Task.Delay(TimeSpan.FromSeconds(30), token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
-        });
+        }, lifetime.Token));
         // One reservation per contact plus the selected group; polling and event callbacks both write.
         var queue = Channel.CreateBounded<ChatWork>(new BoundedChannelOptions(Math.Max(8, 1 + settings.AllowedPrivateUserIds.Length))
             { SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.Wait });
@@ -285,9 +285,10 @@ public static class GroupChatRuntime
                     userId = decision.Message.IsPrivate ? decision.Message.SenderId : 0,
                     decision.Message.MessageId, decision.Reason });
             if (decision.ShouldReply) Enqueue(decision);
+            listenerHealth.Report(null);
             return true;
         });
-        var listening = server.RunAsync(lifetime.Token);
+        var listening = listenerHealth.RunAsync(server.RunAsync, lifetime.Token, propagateFailure: true);
         long lastReplyMicroseconds = -1;
         string? lastError = null;
         control?.Bind(() => new
@@ -296,9 +297,10 @@ public static class GroupChatRuntime
             groupId = group, privateUsers = settings.AllowedPrivateUserIds, policy = policy.Snapshot(), budget = BudgetSnapshot(),
             replyMaxCharacters = persona?.ReplyMaxCharacters ?? 160, maximumOutputTokens,
             lastReplyMilliseconds = Interlocked.Read(ref lastReplyMicroseconds) is var value && value >= 0 ? (double?)value / 1000 : null,
-            lastError = Volatile.Read(ref lastError), recentGroupActivity = ActivitySnapshot(), scheduledMessages = schedules?.Snapshot()
+            lastError = Volatile.Read(ref lastError), recentGroupActivity = ActivitySnapshot(), scheduledMessages = schedules?.Snapshot(),
+            backgroundTasks = BackgroundSnapshot()
         }, SetPausedAsync);
-        var worker = Task.Run(async () =>
+        var worker = Task.Run(() => workerHealth.RunAsync(async _ =>
         {
             try
             {
@@ -311,9 +313,10 @@ public static class GroupChatRuntime
                             var outcome = await schedules!.HandleAsync(claim, lifetime.Token);
                             Write("scheduled_reply", new { claim.TaskId, claim.Revision, claim.Definition.TargetType,
                                 claim.Definition.TargetId, outcome.Status, outcome.MessageId });
+                            workerHealth.Report(null);
                         }
                         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException or TimeoutException)
-                        { Write("scheduled_reply_failed", new { claim.TaskId, type = error.GetType().Name, automaticRetry = false }); }
+                        { workerHealth.Report(error); Write("scheduled_reply_failed", new { claim.TaskId, type = error.GetType().Name, automaticRetry = false }); }
                         continue;
                     }
                     var decision = work.Incoming!;
@@ -329,11 +332,13 @@ public static class GroupChatRuntime
                             userId = decision.Message.IsPrivate ? decision.Message.SenderId : 0,
                             trigger = decision.Trigger.ToString(), triggerMessageId = decision.Message.MessageId,
                             outcome.Status, outcome.MemeId, outcome.MessageId });
+                        workerHealth.Report(null);
                     }
                     catch (OperationCanceledException) { Observe(decision, "cancelled"); Write("reply_cancelled", new { pendingMessageNotRetried = true }); }
                     catch (Exception error)
                     {
                         Volatile.Write(ref lastError, error.GetType().Name);
+                        workerHealth.Report(error);
                         Observe(decision, "failed");
                         // Transport wrappers expose only sanitized messages; never print raw request/response bodies.
                         Write("reply_failed", new { type = error.GetType().Name,
@@ -342,7 +347,7 @@ public static class GroupChatRuntime
                 }
             }
             catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
-        });
+        }, lifetime.Token, propagateFailure: true));
         Write("started", new { group, privateUsers = settings.AllowedPrivateUserIds, selfId = self,
             mode = settings.Mode, live, engine, model, apiBaseUrl, keyEnvironment, server.Prefix,
             durationSeconds = seconds, continuous = seconds == 0,
@@ -384,7 +389,7 @@ public static class GroupChatRuntime
                 }
                 if (DateTimeOffset.UtcNow >= next)
                 { Write("status", new { server.IsRunning, engine, model, apiBaseUrl, keyEnvironment,
-                    policy = policy.Snapshot(), budget = BudgetSnapshot() }); next = DateTimeOffset.UtcNow.AddSeconds(15); }
+                    policy = policy.Snapshot(), budget = BudgetSnapshot(), backgroundTasks = BackgroundSnapshot() }); next = DateTimeOffset.UtcNow.AddSeconds(15); }
                 await Task.Delay(25, lifetime.Token);
             }
         }
@@ -394,10 +399,13 @@ public static class GroupChatRuntime
             lifetime.Cancel();
             var pausing = SetPausedAsync(true);
             queue.Writer.TryComplete();
-            await Task.WhenAll(listening, worker, pausing, health, companionTask ?? Task.CompletedTask);
-            Write("stopped", new { automaticSending = false, voiceStarted = false });
-            scheduleBinding?.Invoke(null);
-            control?.Clear();
+            try { await Task.WhenAll(listening, worker, pausing, health, companionTask ?? Task.CompletedTask); }
+            finally
+            {
+                Write("stopped", new { automaticSending = false, voiceStarted = false });
+                scheduleBinding?.Invoke(null);
+                control?.Clear();
+            }
         }
     }
 

@@ -42,7 +42,7 @@ public static class AdminHttpChecks
         request.Headers.Add("Authorization", "Bearer " + Token); request.Headers.Add("Origin", "https://unrelated.invalid");
         using var wrongOrigin = await fixture.Http.SendAsync(request);
         Check(wrongOrigin.StatusCode == HttpStatusCode.Forbidden, "cross-origin API accepted");
-        foreach (var file in new[] { "", "app.js", "app.css" })
+        foreach (var file in new[] { "", "app.js", "companion.js", "app.css" })
         {
             using var resource = await unauthenticated.GetAsync(file);
             Check(resource.IsSuccessStatusCode && resource.Headers.Contains("Content-Security-Policy") &&

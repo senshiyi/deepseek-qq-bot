@@ -23,17 +23,19 @@ public sealed class CompanionRuntime
     private readonly bool live;
     private readonly TimeProvider timeProvider;
     private readonly Action<string, object> log;
+    private readonly Action<Exception?>? tickCompleted;
     private readonly Dictionary<long, DateTimeOffset> retryAfter = [];
     private DateTimeOffset nextPurge = DateTimeOffset.MinValue;
 
     public CompanionRuntime(CompanionStore store, ContactContextStore contacts, PersonaSettings persona,
         Func<string, IStreamingReply> replyFactory, Func<GroupChatStatus> status,
         Func<long, string, CancellationToken, Task> deliver, IReadOnlyList<long> allowedUsers, bool live,
-        Action<string, object> log, TimeProvider? timeProvider = null)
+        Action<string, object> log, TimeProvider? timeProvider = null, Action<Exception?>? tickCompleted = null)
     {
         this.store = store; this.contacts = contacts; this.persona = persona; this.replyFactory = replyFactory;
         this.status = status; this.deliver = deliver; this.allowedUsers = allowedUsers; this.live = live;
         this.log = log; this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.tickCompleted = tickCompleted;
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -51,17 +53,21 @@ public sealed class CompanionRuntime
 
     internal async Task TickAsync(CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         var now = timeProvider.GetUtcNow();
+        Exception? failure = null;
         CompanionSettings settings;
         try { settings = store.LoadSettings(); }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
+        catch (Exception error) when (Recoverable(error, ct))
         {
             log("companion_settings_unavailable", new { type = error.GetType().Name });
+            tickCompleted?.Invoke(error);
             return;
         }
         if (!live) return;
         var state = status();
         if (state.Paused) return;
+        var retryDeferred = retryAfter.Values.Any(until => now < until);
         if (now >= nextPurge)
         {
             try
@@ -69,8 +75,8 @@ public sealed class CompanionRuntime
                 var removed = store.PurgeExpired();
                 if (removed > 0) log("companion_diary_forgotten", new { removed });
             }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or TimeoutException)
-            { log("companion_forget_failed", new { type = error.GetType().Name }); }
+            catch (Exception error) when (Recoverable(error, ct))
+            { failure = error; log("companion_forget_failed", new { type = error.GetType().Name }); }
             nextPurge = now + PurgeInterval;
         }
         foreach (var user in allowedUsers.Distinct())
@@ -78,13 +84,21 @@ public sealed class CompanionRuntime
             ct.ThrowIfCancellationRequested();
             var contact = state.PrivateContacts.FirstOrDefault(item => item.UserId == user);
             try { await AuditAsync(user, settings, now, ct).ConfigureAwait(false); }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException or InvalidOperationException or TimeoutException)
-            { retryAfter[user] = now + RetryDelay; log("companion_diary_failed", new { userId = user, type = error.GetType().Name }); }
+            catch (Exception error) when (Recoverable(error, ct))
+            { failure = error; retryAfter[user] = now + RetryDelay; log("companion_diary_failed", new { userId = user, type = error.GetType().Name }); }
             try { await WakeAsync(user, settings, contact, now, ct).ConfigureAwait(false); }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException or InvalidOperationException or TimeoutException or OneBotMessageException)
-            { retryAfter[user] = now + RetryDelay; log("companion_wakeup_failed", new { userId = user, type = error.GetType().Name }); }
+            catch (Exception error) when (Recoverable(error, ct))
+            { failure = error; retryAfter[user] = now + RetryDelay; log("companion_wakeup_failed", new { userId = user, type = error.GetType().Name }); }
         }
+        ct.ThrowIfCancellationRequested();
+        // 退避期间的空转不证明失败操作已恢复，保留面板上的失败状态。
+        if (failure is not null || !retryDeferred) tickCompleted?.Invoke(failure);
     }
+
+    private static bool Recoverable(Exception error, CancellationToken ct) =>
+        error is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or
+            TimeoutException or OneBotMessageException or JsonException or HttpRequestException ||
+        error is OperationCanceledException && !ct.IsCancellationRequested;
 
     /// <summary>每天一次：把这天的新私聊整理成日记和心情；没有可记的内容也记为已整理，避免反复调用。</summary>
     private async Task AuditAsync(long user, CompanionSettings settings, DateTimeOffset now, CancellationToken ct)
@@ -93,23 +107,31 @@ public sealed class CompanionRuntime
         if (retryAfter.TryGetValue(user, out var blocked) && now < blocked) return;
         var snapshot = store.Get(user);
         var boundary = CompanionStore.AuditBoundary(now, settings.AuditHour);
-        if (snapshot.LastAuditAt is { } lastAudit && lastAudit >= boundary) return;
-        var from = snapshot.LastAuditAt ?? now.AddDays(-1);
-        var history = contacts.Recent(user, 200).Where(item => item.At > from).ToArray();
+        if (!snapshot.AuditPending && snapshot.LastAuditAt is { } lastAudit && lastAudit >= boundary) return;
+        var history = Unaudited(contacts.Recent(user, 1000), snapshot, now);
         if (history.Length == 0) { store.MarkAudited(user, now); return; }
-        var draft = await CompanionJournal.GenerateAsync(persona, snapshot.Mood, history, replyFactory, ct).ConfigureAwait(false);
+        var batch = CompanionJournal.BuildBatch(history);
+        var draft = await CompanionJournal.GenerateAsync(persona, snapshot.Mood, batch, replyFactory, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
-        var written = 0;
-        foreach (var entry in draft.Entries)
-        {
-            // New writes are stamped with the audit time so forgetting stays measurable from now.
-            store.AddEntry(user, entry.Level, entry.Text, entry.Mood, entry.Unsaid);
-            written++;
-        }
-        if (draft.Mood.Length > 0) store.SetMood(user, draft.Mood);
-        store.MarkAudited(user, now);
-        log("companion_diary", new { userId = user, entries = written, moodUpdated = draft.Mood.Length > 0,
-            until = boundary.AddDays(1) });
+        var completed = batch.Count == history.Length;
+        var last = batch[^1];
+        store.ApplyAuditBatch(user, draft, new CompanionAuditCursor(last.Id, last.At), completed ? now : null);
+        log("companion_diary", new { userId = user, entries = draft.Entries.Count, moodUpdated = draft.Mood.Length > 0,
+            processedMessages = batch.Count, pending = !completed, until = boundary.AddDays(1) });
+    }
+
+    private static StoredPrivateMessage[] Unaudited(IReadOnlyList<StoredPrivateMessage> history,
+        CompanionSnapshot snapshot, DateTimeOffset now)
+    {
+        if (snapshot.AuditCursor is not { } cursor)
+            return history.Where(message => message.At > (snapshot.LastAuditAt ?? now.AddDays(-1))).ToArray();
+        // 同一时间戳的消息沿用原始到达顺序，不能仅按时间跳过整个同秒区间。
+        var position = -1;
+        for (var index = 0; index < history.Count; index++)
+            if (history[index].Id == cursor.MessageId) { position = index; break; }
+        return position >= 0 ? history.Skip(position + 1).ToArray()
+            // 游标已被七天/1000条保留策略清出时，同一时间的剩余消息也必须继续整理。
+            : history.Where(message => message.At >= cursor.At).ToArray();
     }
 
     private async Task WakeAsync(long user, CompanionSettings settings, PrivateChatContactStatus? contact,
@@ -125,7 +147,7 @@ public sealed class CompanionRuntime
         if (reply is not { Send: true } || reply.Text.Trim().Length == 0) return;
         // The contact may have written while the model was thinking; a fresh message gets a normal reply instead.
         var current = contacts.Recent(user, 1).FirstOrDefault();
-        if (current?.At != last!.At || status().Paused) return;
+        if (current?.Id != last!.Id || status().Paused) return;
         await deliver(user, reply.Text.Trim(), ct).ConfigureAwait(false);
         store.MarkWoken(user);
         log("companion_wakeup", new { userId = user, characters = reply.Text.Trim().Length });

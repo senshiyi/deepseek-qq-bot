@@ -111,6 +111,16 @@ public sealed class GroupChatBrain
 
     public static GroupChatReply Parse(string json, IReadOnlySet<string> ids)
     {
+        try { return ParseDecision(json, ids); }
+        catch (JsonException)
+        {
+            // The response can contain private conversation text. Never expose it in an error.
+            throw new InvalidDataException("回复不是有效的JSON决策，已丢弃。");
+        }
+    }
+
+    private static GroupChatReply ParseDecision(string json, IReadOnlySet<string> ids)
+    {
         using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 8 });
         var root = doc.RootElement;
         if (root.ValueKind != JsonValueKind.Object ||

@@ -84,6 +84,7 @@ public sealed class DeepSeekReply : IStreamingReply, IInlineImageSink, IDisposab
     private readonly bool jsonMode;
     private readonly string? imageQuestion;
     private readonly int maximumOutputTokens;
+    private readonly TimeSpan requestTimeout;
     private IReadOnlyList<InlineImage>? attachedImages;
     public string? ObservedModel { get; private set; }
 
@@ -102,11 +103,40 @@ public sealed class DeepSeekReply : IStreamingReply, IInlineImageSink, IDisposab
         this.jsonMode = jsonMode;
         this.imageQuestion = imageQuestion;
         this.maximumOutputTokens = maximumOutputTokens;
+        requestTimeout = TimeSpan.FromSeconds(maximumOutputTokens > 1024 ? 120 : 25);
         http = handler is null ? new HttpClient() : new HttpClient(handler);
         http.Timeout = Timeout.InfiniteTimeSpan;
     }
 
+    internal DeepSeekReply(string apiKey, ApiBudget budget, HttpMessageHandler handler, TimeSpan requestTimeout)
+        : this(apiKey, budget, handler)
+    {
+        if (requestTimeout <= TimeSpan.Zero || requestTimeout > TimeSpan.FromSeconds(120))
+            throw new ArgumentOutOfRangeException(nameof(requestTimeout));
+        this.requestTimeout = requestTimeout;
+    }
+
     public async IAsyncEnumerable<string> StreamAsync(IReadOnlyList<ChatTurn> history,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        await using var source = StreamCoreAsync(history, ct).GetAsyncEnumerator(ct);
+        while (true)
+        {
+            bool next;
+            try { next = await source.MoveNextAsync().ConfigureAwait(false); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            { throw new OperationCanceledException("DeepSeek 请求已取消，既有预算预留保留。", ct); }
+            catch (Exception error) when (error is OperationCanceledException or HttpRequestException or JsonException or InvalidOperationException or DecoderFallbackException)
+            {
+                // Match the school transport's failure boundary; never include network URLs or model text.
+                throw new IOException("DeepSeek 请求超时、失败或响应无效；既有预算预留保留，不自动重试。");
+            }
+            if (!next) yield break;
+            yield return source.Current;
+        }
+    }
+
+    private async IAsyncEnumerable<string> StreamCoreAsync(IReadOnlyList<ChatTurn> history,
         [EnumeratorCancellation] CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -137,7 +167,7 @@ public sealed class DeepSeekReply : IStreamingReply, IInlineImageSink, IDisposab
             return new { role = m.Role, content };
         }).ToArray();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(TimeSpan.FromSeconds(maximumOutputTokens > 1024 ? 120 : 25));
+        timeout.CancelAfter(requestTimeout);
         using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.deepseek.com/chat/completions");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         var requestBody = new Dictionary<string, object>

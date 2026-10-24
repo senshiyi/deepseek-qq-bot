@@ -20,7 +20,7 @@
     dirty: { persona: false, settings: false, public: false, companion: false },
     loading: { persona: false, settings: false, memes: false, companion: false },
     saving: { persona: false, settings: false, memory: false, public: false, history: false, companion: false },
-    companion: null, companionLoaded: false, companionRequest: 0,
+    companion: null, companionRequest: 0,
     userId: null, memoryTab: "notes", memoryGeneration: 0, editingId: null,
     memories: [], history: [], publicLoaded: false, memoriesLoaded: false, historyLoaded: false, historyRequest: 0, memoryRequest: 0,
     memeUrls: new Set(), memeGeneration: 0, memesLoaded: false,
@@ -30,6 +30,8 @@
     receivedSelection: null, receivedPreviewRequest: 0, receivedPreviewReady: false, receivedImporting: false,
     schedules: [], scheduleId: null, scheduleRevision: null, scheduleBusy: false, scheduleGeneration: 0
   };
+
+  const companionPage = window.createCompanionPage({ state, $, api, message, markDirty, confirmDiscard, element, number, date });
 
   function text(id, value) { $(id).textContent = value == null ? "—" : String(value); }
   function message(id, value = "", type = "") {
@@ -78,19 +80,54 @@
     $("stop-button").disabled = disabled || !runtime?.running;
     $("refresh-button").disabled = state.polling;
   }
+  function resetSessionState() {
+    state.session++;
+    for (const group of [state.loading, state.saving, state.dirty]) {
+      for (const key of Object.keys(group)) group[key] = false;
+    }
+    state.status = null;
+    state.settings = null;
+    state.polling = false;
+    state.controlBusy = false;
+    state.favoritesLoading = false;
+    state.userId = null;
+    state.editingId = null;
+    state.memories = [];
+    state.history = [];
+    state.publicLoaded = state.memoriesLoaded = state.historyLoaded = false;
+    state.memoryRequest++;
+    state.historyRequest++;
+    for (const id of ["persona-form", "settings-form", "memory-public-pane"]) $(id).reset();
+    for (const kind of ["persona", "settings", "public"]) {
+      $(`${kind}-fields`).disabled = true;
+      $(`${kind}-save`).disabled = true;
+      text(`${kind}-dirty`, "未读取");
+      $(`${kind}-dirty`).className = "pill neutral";
+    }
+    for (const id of ["persona-retry", "settings-retry", "memes-refresh", "qq-favorites-refresh"]) $(id).disabled = false;
+    $("memory-text").value = "";
+    $("memory-user").value = "";
+    $("memory-contacts").replaceChildren();
+    setMemoryBusy(false);
+    $("memory-text").disabled = true;
+    $("memory-refresh").disabled = $("history-refresh").disabled = $("history-clear").disabled = $("public-refresh").disabled = true;
+    for (const field of $("meme-upload-form").querySelectorAll("input,button")) field.disabled = false;
+    text("meme-upload", "导入表情");
+    $("qq-face-add").disabled = false;
+    renderBackgroundTasks();
+  }
   function showLogin(value = "") {
     const batchWasInFlight = state.memeBatchBusy;
-    state.session++;
+    resetSessionState();
     state.personaLearningSourceRequest++;
     state.personaLearningSourcesLoading = false;
     state.personaLearningSources = [];
     state.personaLearningConfirming = false;
     clearPersonaLearning();
     state.persona = null;
-    state.loading.persona = false;
-    state.saving.persona = false;
     state.memoryGeneration++;
     state.token = "";
+    companionPage.reset();
     state.connected = false;
     storeToken("");
     stopPolling();
@@ -196,6 +233,7 @@
     renderRuntimeRows("contact", policy?.privateContacts, true, !!runtime);
     renderGroupActivity(runtime?.recentGroupActivity);
     renderBudget(runtime?.budget);
+    renderBackgroundTasks(runtime?.backgroundTasks);
     if (state.settings?.activeGroupId === 0 && !state.dirty.settings) renderActiveGroupOptions(0);
     updateControls();
   }
@@ -221,6 +259,22 @@
     const empty = $(`${prefix}-empty`);
     empty.hidden = items.length > 0;
     empty.textContent = !runtimeReady ? "等待运行实例就绪。" : !Array.isArray(values) ? "当前运行未提供这项状态。" : privateChat ? "当前没有私聊联系人状态。" : "当前没有群聊状态。";
+  }
+  function renderBackgroundTasks(values) {
+    const items = Array.isArray(values) ? values : [];
+    const names = { companion: "心脑（日记、心情与主动唤醒）", "onebot-health": "QQ 健康检查", "message-listener": "消息监听", "message-worker": "消息处理" };
+    const states = { starting: "正在启动", running: "运行中", failed: "失败", stopped: "已停止" };
+    for (const id of ["background-tasks", "companion-background-tasks"]) {
+      const container = $(id); container.replaceChildren();
+      if (!items.length) { container.append(element("p", "当前运行未提供后台任务状态。", "muted")); continue; }
+      for (const item of items) {
+        const row = element("p");
+        row.append(element("strong", `${names[item.name] || item.name}：`),
+          element("span", states[item.state] || "状态未知", `pill${item.state === "failed" ? " warning" : " neutral"}`));
+        row.append(element("span", ` · 最近成功：${item.lastSuccessAt ? date(item.lastSuccessAt) : "尚无记录"}${item.lastError ? ` · 最近错误：${item.lastError}` : ""}`, "muted"));
+        container.append(row);
+      }
+    }
   }
   function renderGroupActivity(values) {
     const rows = $("group-activity-rows"); rows.replaceChildren();
@@ -266,31 +320,38 @@
     stopPolling();
     if (state.polling || !state.token || document.hidden) { schedulePolling(); return; }
     state.polling = true;
+    const session = state.session;
     updateControls();
     try {
-      renderStatus(await api("/api/status", { timeout: 12000 }));
+      const payload = await api("/api/status", { timeout: 12000 });
+      if (session !== state.session) return;
+      renderStatus(payload);
       if (state.view === "schedules" && !state.scheduleBusy) await loadSchedules(false);
     }
     catch (error) {
+      if (session !== state.session) return;
       state.connected = false;
       $("connection-status").className = "connection error";
       text("connection-text", "连接中断");
       notice(`${error.message} 上方状态保留最后一次成功读取的结果。`, "error", "status");
-    } finally { state.polling = false; updateControls(); schedulePolling(); }
+    } finally { if (session === state.session) { state.polling = false; updateControls(); schedulePolling(); } }
   }
   async function control(action) {
     if (action === "stop" && !window.confirm("确定停止机器人？当前回复会结束；之后需要从启动入口重新运行机器人。")) return;
     state.controlBusy = true;
+    const session = state.session;
     updateControls();
     const labels = { pause: "正在暂停…", resume: "正在恢复…", apply: "正在请求重载已保存设置…", stop: "正在停止机器人…" };
     notice(labels[action]);
     try {
       await api("/api/control", { method: "POST", body: { action }, timeout: 45000 });
+      if (session !== state.session) return;
       notice(({ pause: "已暂停回复。", resume: "已恢复回复。", apply: "重载请求已接受，正在异步应用已保存设置；请查看当前运行状态确认生效。", stop: "停止指令已完成。重新运行请使用本机启动入口。" })[action]);
       await refreshStatus();
     } catch (error) {
+      if (session !== state.session) return;
       notice(`${error.message}${action === "stop" ? " 停止指令可能已生效，请检查本机运行窗口。" : action === "apply" ? " 请确认本地服务状态后再试，已保存的设置仍保留。" : ""}`, "error");
-    } finally { state.controlBusy = false; updateControls(); }
+    } finally { if (session === state.session) { state.controlBusy = false; updateControls(); } }
   }
 
   function markDirty(kind, value = true) {
@@ -514,8 +575,9 @@
     "settings-active-every": "activeMessageEvery"
   };
   async function loadSettings(force = false) {
-    if (state.loading.settings || (state.settings && !force)) return;
+    if (state.loading.settings || state.saving.settings || (state.settings && !force)) return;
     if (force && !confirmDiscard("settings")) return;
+    const session = state.session;
     state.loading.settings = true;
     $("settings-fields").disabled = true;
     $("settings-save").disabled = true;
@@ -523,6 +585,7 @@
     message("settings-message", "正在读取运行设置…");
     try {
       const value = await api("/api/settings");
+      if (session !== state.session) return;
       state.settings = value;
       for (const [id, key] of Object.entries(settingFields)) $(id).value = value[key] ?? "";
       $("settings-groups").value = (value.allowedGroupIds || []).join("\n");
@@ -537,8 +600,8 @@
       markDirty("settings", false);
       renderContacts();
       message("settings-message", "运行设置已读取。");
-    } catch (error) { message("settings-message", `${error.message} 点击“重新读取”重试。`, "error"); }
-    finally { state.loading.settings = false; $("settings-retry").disabled = false; }
+    } catch (error) { if (session === state.session) message("settings-message", `${error.message} 点击“重新读取”重试。`, "error"); }
+    finally { if (session === state.session) { state.loading.settings = false; $("settings-retry").disabled = false; } }
   }
   function splitValues(value) { return value.split(/[,，、;；\n\r]+/).map(item => item.trim()).filter(Boolean); }
   function qqId(value) {
@@ -578,7 +641,8 @@
   }
   async function saveSettings(event) {
     event.preventDefault();
-    if (!state.settings || state.saving.settings) return;
+    if (!state.settings || state.loading.settings || state.saving.settings) return;
+    const session = state.session;
     let value;
     try {
       value = { ...state.settings };
@@ -599,13 +663,14 @@
     message("settings-message", "正在保存运行设置…");
     try {
       await api("/api/settings", { method: "PUT", body: value });
+      if (session !== state.session) return;
       state.settings = value;
       markDirty("settings", false);
       renderContacts();
       message("settings-message", "设置已保存。点击顶部“应用设置”重载。", "success");
       $("restart-notice").hidden = false;
-    } catch (error) { message("settings-message", error.message, "error"); }
-    finally { state.saving.settings = false; $("settings-fields").disabled = false; $("settings-retry").disabled = false; $("settings-save").disabled = !state.dirty.settings; }
+    } catch (error) { if (session === state.session) message("settings-message", error.message, "error"); }
+    finally { if (session === state.session) { state.saving.settings = false; $("settings-fields").disabled = false; $("settings-retry").disabled = false; $("settings-save").disabled = !state.dirty.settings; } }
   }
 
   function renderContacts() {
@@ -780,6 +845,7 @@
   async function saveMemory(event) {
     event.preventDefault();
     if (!state.userId || state.saving.memory || !$("memory-text").value.trim()) return;
+    const session = state.session;
     const editingId = state.editingId;
     const userId = state.userId;
     const content = $("memory-text").value.trim();
@@ -788,23 +854,26 @@
     message("memory-message", "正在保存长期笔记…");
     try {
       await api(editingId ? `/api/memories/${encodeURIComponent(editingId)}` : "/api/memories", { method: editingId ? "PUT" : "POST", body: { userId, text: content } });
+      if (session !== state.session) return;
       resetMemoryEditor();
       message("memory-message", "长期笔记已保存；开启群聊共享后也可用于该成员触发的群聊回复。", "success");
       await loadMemories(true);
-    } catch (error) { message("memory-message", error.message, "error"); }
-    finally { setMemoryBusy(false); }
+    } catch (error) { if (session === state.session) message("memory-message", error.message, "error"); }
+    finally { if (session === state.session) setMemoryBusy(false); }
   }
   async function deleteMemory(memory) {
     if (state.saving.memory || !window.confirm(`确定删除 QQ ${state.userId} 的这条长期笔记？此操作无法撤销。`)) return;
+    const session = state.session;
     setMemoryBusy(true);
     message("memory-message", "正在删除笔记…");
     try {
       await api(`/api/memories/${encodeURIComponent(memory.id)}?userId=${state.userId}`, { method: "DELETE" });
+      if (session !== state.session) return;
       if (state.editingId === memory.id) resetMemoryEditor();
       message("memory-message", "长期笔记已删除。", "success");
       await loadMemories(true);
-    } catch (error) { message("memory-message", error.message, "error"); }
-    finally { setMemoryBusy(false); }
+    } catch (error) { if (session === state.session) message("memory-message", error.message, "error"); }
+    finally { if (session === state.session) setMemoryBusy(false); }
   }
   async function loadHistory(force = false) {
     if (state.saving.history || (state.historyLoaded && !force)) return;
@@ -839,6 +908,7 @@
   }
   async function clearHistory() {
     if (!state.userId || state.saving.history || !window.confirm(`确定清除 QQ ${state.userId} 的全部已保存私聊原文？无法撤销，长期笔记将保留。`)) return;
+    const session = state.session;
     state.historyRequest++;
     state.saving.history = true;
     $("history-clear").disabled = true;
@@ -846,6 +916,7 @@
     message("history-message", "正在清除该联系人的私聊原文…");
     try {
       await api(`/api/history?userId=${state.userId}`, { method: "DELETE" });
+      if (session !== state.session) return;
       state.history = [];
       $("history-list").replaceChildren();
       state.memoriesLoaded = false;
@@ -853,8 +924,8 @@
       $("memory-suggestions-list").replaceChildren();
       message("memory-suggestions-message", "私聊原文已清除；重新读取长期笔记时将同步更新待确认请求。");
       message("history-message", "该联系人的已保存私聊原文已清除，长期笔记已保留。", "success");
-    } catch (error) { message("history-message", error.message, "error"); }
-    finally { state.saving.history = false; $("history-refresh").disabled = false; $("history-clear").disabled = !state.userId; }
+    } catch (error) { if (session === state.session) message("history-message", error.message, "error"); }
+    finally { if (session === state.session) { state.saving.history = false; $("history-refresh").disabled = false; $("history-clear").disabled = !state.userId; } }
   }
   async function loadPublic(force = false) {
     if (state.publicLoaded && !force) return;
@@ -882,6 +953,7 @@
   async function savePublic(event) {
     event.preventDefault();
     if (!state.userId || state.saving.public || !state.publicLoaded) return;
+    const session = state.session;
     const body = { userId: state.userId, address: $("public-address").value.trim(), tone: $("public-tone").value, replyLength: $("public-length").value, approved: $("public-approved").checked };
     state.saving.public = true;
     $("public-fields").disabled = true;
@@ -890,10 +962,11 @@
     message("public-message", "正在保存公开偏好…");
     try {
       await api("/api/public-preferences", { method: "PUT", body });
+      if (session !== state.session) return;
       markDirty("public", false);
       message("public-message", body.approved ? "公开偏好已保存并批准，可用于该 QQ 触发的授权群回复。" : "公开偏好已保存，尚未批准，不用于群聊。", "success");
-    } catch (error) { message("public-message", error.message, "error"); }
-    finally { state.saving.public = false; $("public-fields").disabled = false; $("public-refresh").disabled = false; $("public-save").disabled = !state.dirty.public; }
+    } catch (error) { if (session === state.session) message("public-message", error.message, "error"); }
+    finally { if (session === state.session) { state.saving.public = false; $("public-fields").disabled = false; $("public-refresh").disabled = false; $("public-save").disabled = !state.dirty.public; } }
   }
 
   function revokeMemeUrls() {
@@ -938,11 +1011,13 @@
   async function loadMemes(force = false) {
     if (state.loading.memes || (state.memesLoaded && !force)) return;
     if (force && all("#meme-grid .meme-card input").some(input => input.dataset.saved !== input.value) && !window.confirm("刷新会放弃尚未保存的表情标签，是否继续？")) return;
+    const session = state.session;
     state.loading.memes = true;
     $("memes-refresh").disabled = true;
     message("memes-message", "正在读取表情库…");
     try {
       const values = await api("/api/memes");
+      if (session !== state.session) return;
       revokeMemeUrls();
       const generation = state.memeGeneration;
       const items = Array.isArray(values) ? values : [];
@@ -1019,8 +1094,8 @@
         }
       });
       await Promise.all(workers);
-    } catch (error) { message("memes-message", `${error.message} 点击“刷新”重试。`, "error"); }
-    finally { state.loading.memes = false; $("memes-refresh").disabled = false; }
+    } catch (error) { if (session === state.session) message("memes-message", `${error.message} 点击“刷新”重试。`, "error"); }
+    finally { if (session === state.session) { state.loading.memes = false; $("memes-refresh").disabled = false; } }
   }
   async function loadPreview(meme, preview, generation) {
     if (Number.isInteger(meme.faceId)) {
@@ -1053,6 +1128,7 @@
   }
   async function addQqFace(event) {
     event.preventDefault();
+    const session = state.session;
     const faceId = Number($("qq-face-id").value);
     let parsedTags;
     try {
@@ -1063,13 +1139,15 @@
     $("qq-face-add").disabled = true;
     try {
       await api("/api/qq-faces", { method: "POST", body: { faceId, tags: parsedTags } });
+      if (session !== state.session) return;
       message("qq-face-message", `qq_face_${faceId} 已收录，下一轮回复生效。`, "success");
       await loadMemes(true);
-    } catch (error) { message("qq-face-message", error.message, "error"); }
-    finally { $("qq-face-add").disabled = false; }
+    } catch (error) { if (session === state.session) message("qq-face-message", error.message, "error"); }
+    finally { if (session === state.session) $("qq-face-add").disabled = false; }
   }
   async function loadQqFavorites() {
     if (state.favoritesLoading) return;
+    const session = state.session;
     state.favoritesLoading = true;
     $("qq-favorites-refresh").disabled = true;
     message("qq-favorites-message", "正在读取当前机器人 QQ 的收藏表情…");
@@ -1127,8 +1205,8 @@
         }
       });
       await Promise.all(workers);
-    } catch (error) { message("qq-favorites-message", `${error.message} 请确认 NapCat 在线并登录机器人账号，再重新读取。`, "error"); }
-    finally { state.favoritesLoading = false; $("qq-favorites-refresh").disabled = false; }
+    } catch (error) { if (session === state.session) message("qq-favorites-message", `${error.message} 请确认 NapCat 在线并登录机器人账号，再重新读取。`, "error"); }
+    finally { if (session === state.session) { state.favoritesLoading = false; $("qq-favorites-refresh").disabled = false; } }
   }
   async function loadReceivedImages() {
     if (state.receivedLoading || state.receivedImporting) return;
@@ -1428,6 +1506,7 @@
   }
   async function uploadMeme(event) {
     event.preventDefault();
+    const session = state.session;
     const file = $("meme-file").files[0];
     const id = $("meme-id").value.trim();
     let parsedTags;
@@ -1446,13 +1525,15 @@
     text("meme-upload", "正在导入…");
     try {
       const base64 = await fileBase64(file);
+      if (session !== state.session) return;
       message("meme-upload-message", "正在导入图片与标签，请稍候…");
       await api("/api/memes", { method: "POST", body: { id, tags: parsedTags, base64 }, timeout: 60000 });
+      if (session !== state.session) return;
       $("meme-upload-form").reset();
       message("meme-upload-message", `表情 ${id} 已导入，下一轮回复生效。`, "success");
       await loadMemes(true);
-    } catch (error) { message("meme-upload-message", error.message, "error"); }
-    finally { for (const field of fields) field.disabled = false; text("meme-upload", "导入表情"); }
+    } catch (error) { if (session === state.session) message("meme-upload-message", error.message, "error"); }
+    finally { if (session === state.session) { for (const field of fields) field.disabled = false; text("meme-upload", "导入表情"); } }
   }
 
   function scheduleDate(value) {
@@ -1592,121 +1673,6 @@
     finally { if (session === state.session) setScheduleBusy(false); }
   }
 
-  function writeCompanionForm(value) {
-    $("companion-audit").checked = value.audit !== false;
-    $("companion-enabled").checked = value.enabled === true;
-    $("companion-hour").value = value.auditHour ?? 4;
-    $("companion-idle").value = value.idleMinutes ?? 120;
-    $("companion-cooldown").value = value.cooldownMinutes ?? 120;
-    $("companion-limit").value = value.dailyLimit ?? 4;
-  }
-  function readCompanionForm() {
-    return { audit: $("companion-audit").checked, enabled: $("companion-enabled").checked, auditHour: Number($("companion-hour").value),
-      idleMinutes: Number($("companion-idle").value), cooldownMinutes: Number($("companion-cooldown").value),
-      dailyLimit: Number($("companion-limit").value) };
-  }
-  async function loadCompanion(force = false) {
-    if (state.loading.companion) return;
-    if (force && !confirmDiscard("companion")) return;
-    if (state.companion && !force) return;
-    const session = state.session, request = ++state.companionRequest;
-    state.loading.companion = true;
-    $("companion-fields").disabled = true; $("companion-save").disabled = true;
-    $("companion-retry").disabled = true; $("companion-refresh").disabled = true;
-    message("companion-message", "正在读取心情与日记…");
-    try {
-      const value = await api("/api/companion");
-      if (session !== state.session || request !== state.companionRequest) return;
-      state.companion = value;
-      writeCompanionForm(value.settings || {});
-      renderCompanion(value);
-      markDirty("companion", false);
-      $("companion-fields").disabled = false;
-      message("companion-message", "已读取；设置保存后立即生效。");
-    } catch (error) {
-      if (session === state.session && request === state.companionRequest) message("companion-message", `${error.message} 点击“重新读取”重试。`, "error");
-    } finally {
-      if (session === state.session) {
-        state.loading.companion = false;
-        $("companion-retry").disabled = false; $("companion-refresh").disabled = false;
-        if (state.dirty.companion) $("companion-save").disabled = false;
-      }
-    }
-  }
-  async function saveCompanion(event) {
-    event.preventDefault();
-    if (state.saving.companion || !$("companion-form").reportValidity()) return;
-    const session = state.session;
-    state.saving.companion = true; $("companion-save").disabled = true;
-    message("companion-message", "正在保存…");
-    try {
-      const settings = readCompanionForm();
-      await api("/api/companion-settings", { method: "PUT", body: settings });
-      if (session !== state.session) return;
-      if (state.companion) state.companion.settings = settings;
-      markDirty("companion", false);
-      message("companion-message", "已保存并立即生效；不需要应用设置。", "success");
-    } catch (error) { if (session === state.session) message("companion-message", error.message, "error"); }
-    finally {
-      if (session === state.session) {
-        state.saving.companion = false;
-        $("companion-save").disabled = !state.dirty.companion;
-      }
-    }
-  }
-  function renderCompanion(value) {
-    const list = $("companion-list");
-    list.replaceChildren();
-    const contacts = Array.isArray(value.contacts) ? value.contacts : [];
-    $("companion-empty").hidden = contacts.length > 0;
-    for (const item of contacts) {
-      const card = element("article", null, "panel");
-      const heading = element("div", null, "panel-heading");
-      const summary = element("div", null, "");
-      summary.append(element("h3", `QQ ${item.userId}`),
-        element("p", item.mood ? `当前心情：${item.mood}` : "当前心情：未记录", "muted"));
-      heading.append(summary);
-      card.append(heading);
-      const details = element("dl", null, "connection-details");
-      for (const [label, shown] of [["上次整理", item.lastAuditAt ? date(item.lastAuditAt) : "未整理"],
-        ["上次主动", item.lastWakeupAt ? date(item.lastWakeupAt) : "未主动"],
-        ["今天已主动", `${number(item.wakeupsToday)} 次`]]) {
-        const wrap = element("div", null, "");
-        wrap.append(element("dt", label), element("dd", shown));
-        details.append(wrap);
-      }
-      card.append(details);
-      const entries = Array.isArray(item.entries) ? item.entries : [];
-      if (entries.length === 0) card.append(element("p", "还没有日记条目；到整理时间后由模型写入。", "field-help"));
-      for (const entry of entries) {
-        const row = element("div", null, "memory-item");
-        const body = element("div", null, "");
-        body.append(element("p", `[${entry.levelLabel}] ${entry.text}`));
-        const foot = `记录 ${date(entry.createdAt)} · ${entry.expiresAt ? `遗忘于 ${date(entry.expiresAt)}` : "永不遗忘"}`;
-        body.append(element("p",
-          foot + (entry.mood ? ` · 当时心情：${entry.mood}` : "") + (entry.unsaid ? ` · 没说出口：${entry.unsaid}` : ""),
-          "field-help"));
-        const remove = element("button", "删除", "button compact danger-quiet");
-        remove.type = "button";
-        remove.addEventListener("click", () => removeCompanionEntry(item.userId, entry));
-        row.append(body, remove);
-        card.append(row);
-      }
-      list.append(card);
-    }
-  }
-  async function removeCompanionEntry(userId, entry) {
-    if (!window.confirm("删除这条日记？删除后不再参与回复。")) return;
-    const session = state.session;
-    try {
-      await api(`/api/companion/${userId}/entries/${entry.id}`, { method: "DELETE" });
-      if (session !== state.session) return;
-      state.companion = null;
-      await loadCompanion(true);
-      message("companion-message", "日记已删除。", "success");
-    } catch (error) { if (session === state.session) message("companion-message", error.message, "error"); }
-  }
-
   async function navigate(view) {
     if (!titles[view]) return;
     if (state.view === "persona" && view !== "persona") {
@@ -1730,7 +1696,7 @@
     if (view === "settings" || view === "memories") await loadSettings();
     if (view === "memes") await loadMemes();
     if (view === "schedules") { updateScheduleType(); await loadSchedules(); }
-    if (view === "companion") await loadCompanion();
+    if (view === "companion") await companionPage.load();
   }
   async function connect(token) {
     state.token = token.trim();
@@ -1748,9 +1714,10 @@
       $("app-shell").hidden = false;
       renderStatus(payload);
       await navigate(state.view);
+      if (session !== state.session) return;
       schedulePolling();
     } catch (error) { if (session === state.session) message("login-message", error.message, "error"); }
-    finally { $("login-submit").disabled = false; text("login-submit", "连接控制台"); }
+    finally { if (session === state.session) { $("login-submit").disabled = false; text("login-submit", "连接控制台"); } }
   }
 
   $("login-form").addEventListener("submit", event => { event.preventDefault(); connect($("login-token").value); });
@@ -1766,10 +1733,6 @@
   $("schedule-type").addEventListener("change", updateScheduleType);
   $("schedule-form").addEventListener("submit", saveSchedule);
   $("schedules-refresh").addEventListener("click", () => loadSchedules());
-  $("companion-form").addEventListener("input", () => { markDirty("companion"); message("companion-message", "有未保存的修改。"); });
-  $("companion-form").addEventListener("submit", saveCompanion);
-  $("companion-refresh").addEventListener("click", () => loadCompanion(true));
-  $("companion-retry").addEventListener("click", () => loadCompanion(true));
   $("schedule-cancel").addEventListener("click", resetScheduleEditor);
   $("pause-button").addEventListener("click", () => control("pause"));
   $("resume-button").addEventListener("click", () => control("resume"));

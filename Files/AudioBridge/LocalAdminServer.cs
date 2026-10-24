@@ -137,7 +137,7 @@ public sealed partial class LocalAdminServer
             {
                 if (request.HttpMethod != "GET") { response.StatusCode = 405; return; }
                 if (path == "/favicon.ico") { response.StatusCode = 204; return; }
-                var file = path switch { "/" or "/index.html" => "index.html", "/app.css" => "app.css", "/app.js" => "app.js", _ => null };
+                var file = path switch { "/" or "/index.html" => "index.html", "/app.css" => "app.css", "/app.js" => "app.js", "/companion.js" => "companion.js", _ => null };
                 if (file is null) { response.StatusCode = 404; return; }
                 using var resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("AudioBridge.AdminWeb." + file);
                 if (resource is null) { response.StatusCode = 503; return; }

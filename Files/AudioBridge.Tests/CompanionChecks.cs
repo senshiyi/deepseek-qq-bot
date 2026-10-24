@@ -21,7 +21,15 @@ public static class CompanionChecks
             ("audit boundary follows the configured local hour", Boundary),
             ("wake loop sends once, respects cooldown and the daily limit", WakeLoop),
             ("wake loop stays quiet when paused, busy or the model declines", WakeLoopQuiet),
-            ("daily audit writes the diary once and updates the mood", DailyAudit)
+            ("daily audit writes the diary once and updates the mood", DailyAudit),
+            ("Shanghai midnight reopens a capped wake gate before any new write", ShanghaiRollover),
+            ("journal batches cover older and same-time messages and resume after restart", AuditBatches),
+            ("a failed later journal batch retains its exact progress for retry", AuditRetry),
+            ("journal capacity failures leave mood entries and progress unchanged", AtomicAudit),
+            ("legacy companion documents load without inventing audit progress", LegacyProgress),
+            ("invalid wake and diary JSON are observed as failures and recover after backoff", ParserRecovery),
+            ("wake model errors report failure and the next attempt can recover", ModelRecovery),
+            ("external cancellation remains cancellation and never reports a successful tick", ExternalCancellation)
         };
         foreach (var check in checks)
         {
@@ -257,20 +265,259 @@ public static class CompanionChecks
         Check(calls == 1, "disabled diary audit still called the model");
     }
 
+    private static async Task ShanghaiRollover()
+    {
+        using var folder = new Folder();
+        folder.Now = new DateTimeOffset(2026, 10, 21, 13, 0, 0, TimeSpan.Zero);
+        var store = folder.Store();
+        var contacts = new ContactContextStore(folder.Root, () => folder.Now);
+        var clock = new FixedTime(folder.Now);
+        store.SaveSettings(new CompanionSettings { Audit = false, Enabled = true, DailyLimit = 1, CooldownMinutes = 30 });
+        contacts.AppendMessage(123, "user", "晚安", "m1", folder.Now.AddHours(-3));
+        var delivered = new List<string>();
+        var runtime = Runtime(store, contacts, clock, () => { }, delivered, "{\"send\":true,\"text\":\"想你了\"}");
+        await runtime.TickAsync(CancellationToken.None);
+        var capped = store.Get(123);
+        Check(capped.WakeupsToday == 1, "fixture never reached its daily cap");
+        await runtime.TickAsync(CancellationToken.None);
+        Check(delivered.Count == 1, "same-day cap was ignored");
+        folder.Now = new DateTimeOffset(2026, 10, 21, 16, 1, 0, TimeSpan.Zero);
+        clock.Now = folder.Now;
+        Check(store.Get(123).WakeupsToday == 0 && store.All().Single().WakeupsToday == 0,
+            "read retained the previous Shanghai day's count");
+        Check(CompanionStore.ShouldWake(store.LoadSettings(), capped, folder.Now.AddHours(-5), folder.Now, false, 0),
+            "a previously read snapshot stayed capped across Shanghai midnight");
+        await runtime.TickAsync(CancellationToken.None);
+        Check(delivered.Count == 2 && store.Get(123).WakeupsToday == 1, "next-day send gate stayed closed");
+        folder.Now = new DateTimeOffset(2026, 10, 22, 0, 1, 0, TimeSpan.Zero);
+        Check(store.Get(123).WakeupsToday == 1, "UTC midnight incorrectly reset the Shanghai daily counter");
+        Check(CompanionStore.AuditBoundary(new DateTimeOffset(2026, 10, 21, 21, 0, 0, TimeSpan.Zero), 4) ==
+              new DateTimeOffset(2026, 10, 22, 4, 0, 0, TimeSpan.FromHours(8)), "audit boundary depended on the machine timezone");
+    }
+
+    private static async Task AuditBatches()
+    {
+        using var folder = new Folder();
+        var store = folder.Store();
+        var contacts = new ContactContextStore(folder.Root, () => folder.Now);
+        var clock = new FixedTime(folder.Now);
+        store.SaveSettings(new CompanionSettings { Audit = true });
+        var timestamp = folder.Now.AddMinutes(-5);
+        for (var index = 0; index < 230; index++)
+            contacts.AppendMessage(123, "user", "mark" + index.ToString("D3") + ":" + new string('x', 70), "m" + index, timestamp);
+        var sources = new List<string>();
+        CompanionRuntime Create() => Runtime(folder.Store(), contacts, clock, () => { }, [], "",
+            replyFactory: _ => new InspectReply((history, _) =>
+            {
+                sources.Add(history.Single().Content);
+                return "{\"mood\":\"平静\",\"entries\":[]}";
+            }));
+        var runtime = Create();
+        await runtime.TickAsync(CancellationToken.None);
+        Check(store.Get(123) is { AuditPending: true, AuditCursor: not null, LastAuditAt: null },
+            "first truncated batch marked the whole audit complete");
+        runtime = Create();
+        for (var attempt = 0; attempt < 5 && store.Get(123).AuditPending; attempt++)
+            await runtime.TickAsync(CancellationToken.None);
+        Check(!store.Get(123).AuditPending && store.Get(123).LastAuditAt == folder.Now && sources.Count > 1,
+            "batched audit never completed after rebuilding its runtime");
+        var joined = string.Join("", sources);
+        for (var index = 0; index < 230; index++)
+        {
+            var marker = "mark" + index.ToString("D3") + ":";
+            Check(joined.Split(marker, StringSplitOptions.None).Length == 2, "source was skipped or repeated: " + marker);
+        }
+        Check(sources.All(source => source.Length <= CompanionJournal.MaximumSourceCharacters), "a journal batch exceeded its character limit");
+        contacts.AppendMessage(123, "user", "late-same-timestamp", "later", timestamp);
+        folder.Now = folder.Now.AddDays(1);
+        clock.Now = folder.Now;
+        await runtime.TickAsync(CancellationToken.None);
+        Check(sources[^1].Contains("late-same-timestamp", StringComparison.Ordinal) &&
+              !sources[^1].Contains("mark", StringComparison.Ordinal), "late same-time message was lost or earlier messages replayed");
+    }
+
+    private static async Task AuditRetry()
+    {
+        using var folder = new Folder();
+        var store = folder.Store();
+        var contacts = new ContactContextStore(folder.Root, () => folder.Now);
+        var clock = new FixedTime(folder.Now);
+        store.SaveSettings(new CompanionSettings { Audit = true });
+        for (var index = 0; index < 20; index++)
+            contacts.AppendMessage(123, "user", "retry" + index.ToString("D2") + new string('x', 990), "m" + index, folder.Now.AddMinutes(-5));
+        var calls = 0;
+        var successful = new List<string>();
+        var runtime = Runtime(store, contacts, clock, () => { }, [], "", replyFactory: _ => new InspectReply((history, _) =>
+        {
+            calls++;
+            if (calls == 2) throw new JsonException("invalid fixture response");
+            successful.Add(history.Single().Content);
+            return "{\"mood\":\"平静\",\"entries\":[]}";
+        }));
+        await runtime.TickAsync(CancellationToken.None);
+        var progress = store.Get(123).AuditCursor;
+        await runtime.TickAsync(CancellationToken.None);
+        Check(store.Get(123).AuditCursor == progress && store.Get(123).AuditPending && store.Get(123).LastAuditAt is null,
+            "failed second batch advanced or discarded progress");
+        folder.Now = folder.Now.AddMinutes(11);
+        clock.Now = folder.Now;
+        await runtime.TickAsync(CancellationToken.None);
+        Check(calls == 3 && !store.Get(123).AuditPending, "later journal batch did not recover after backoff");
+        var joined = string.Join("", successful);
+        for (var index = 0; index < 20; index++)
+            Check(joined.Split("retry" + index.ToString("D2"), StringSplitOptions.None).Length == 2, "successful batch replayed or omitted a message");
+    }
+
+    private static Task AtomicAudit()
+    {
+        using var folder = new Folder();
+        var store = folder.Store();
+        store.SetMood(123, "原来的心情");
+        var entry = store.AddEntry(123, DiaryLevels.Vital, "原来的日记", "", "");
+        var path = folder.Doc(123);
+        using (var source = JsonDocument.Parse(File.ReadAllText(path)))
+        {
+            var document = System.Text.Json.Nodes.JsonNode.Parse(source.RootElement.GetRawText())!;
+            document["entries"] = JsonSerializer.SerializeToNode(Enumerable.Range(0, 199)
+                .Select(_ => entry with { Id = Guid.NewGuid().ToString("D") }),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            File.WriteAllText(path, document.ToJsonString());
+        }
+        var before = File.ReadAllBytes(path);
+        var draft = new JournalDraft("新心情", [new(DiaryLevels.Normal, "新日记1", "", ""), new(DiaryLevels.Normal, "新日记2", "", "")]);
+        Reject(() => store.ApplyAuditBatch(123, draft, new(Guid.NewGuid().ToString("D"), folder.Now), folder.Now));
+        Check(File.ReadAllBytes(path).SequenceEqual(before), "capacity failure partially wrote diary mood or progress");
+        Check(store.Get(123) is { AuditCursor: null, LastAuditAt: null, Mood: "原来的心情" }, "failed atomic write changed observable state");
+        using var lockedFolder = new Folder();
+        var lockedStore = lockedFolder.Store();
+        lockedStore.SetMood(123, "原心情");
+        lockedStore.AddEntry(123, DiaryLevels.Vital, "原日记", "", "");
+        var lockedPath = lockedFolder.Doc(123);
+        var lockedBefore = File.ReadAllBytes(lockedPath);
+        var next = new JournalDraft("新心情", [new(DiaryLevels.Normal, "新日记", "", "")]);
+        var cursor = new CompanionAuditCursor(Guid.NewGuid().ToString("D"), lockedFolder.Now);
+        using (var held = new FileStream(lockedPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            try { lockedStore.ApplyAuditBatch(123, next, cursor, lockedFolder.Now); throw new Exception("locked replacement unexpectedly succeeded"); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+        Check(File.ReadAllBytes(lockedPath).SequenceEqual(lockedBefore), "failed file replacement partially changed journal state");
+        lockedStore.ApplyAuditBatch(123, next, cursor, lockedFolder.Now);
+        Check(lockedStore.Get(123) is { Mood: "新心情", AuditPending: false } after && after.AuditCursor == cursor &&
+              after.LastAuditAt == lockedFolder.Now && after.Entries.Count == 2, "retry did not commit diary mood and progress together");
+        return Task.CompletedTask;
+    }
+
+    private static Task LegacyProgress()
+    {
+        using var folder = new Folder();
+        System.IO.Directory.CreateDirectory(folder.Directory);
+        File.WriteAllText(folder.Doc(123), "{\"version\":1,\"userId\":123,\"mood\":\"旧心情\",\"entries\":[]}");
+        var snapshot = folder.Store().Get(123);
+        Check(snapshot is { Mood: "旧心情", AuditCursor: null, AuditPending: false }, "legacy document failed optional progress migration");
+        return Task.CompletedTask;
+    }
+
+    private static async Task ModelRecovery()
+    {
+        foreach (var error in new Exception[] { new JsonException(), new HttpRequestException(), new OperationCanceledException() })
+        {
+            using var folder = new Folder();
+            var store = folder.Store();
+            var contacts = new ContactContextStore(folder.Root, () => folder.Now);
+            var clock = new FixedTime(folder.Now);
+            store.SaveSettings(new CompanionSettings { Audit = false, Enabled = true });
+            contacts.AppendMessage(123, "user", "晚安", "m1", folder.Now.AddHours(-5));
+            var outcomes = new List<Exception?>();
+            var calls = 0;
+            var runtime = Runtime(store, contacts, clock, () => { }, [], "", replyFactory: _ => new InspectReply((_, _) =>
+            {
+                if (++calls == 1) throw error;
+                return "{\"send\":false,\"text\":\"\"}";
+            }), tickCompleted: outcomes.Add);
+            await runtime.TickAsync(CancellationToken.None);
+            Check(outcomes.Single() == error && store.Get(123).WakeupsToday == 0, "model error escaped or was reported as a quiet success");
+            await runtime.TickAsync(CancellationToken.None);
+            Check(calls == 1 && outcomes.Count == 1, "backoff was reported as a successful model recovery");
+            folder.Now = folder.Now.AddMinutes(11);
+            clock.Now = folder.Now;
+            await runtime.TickAsync(CancellationToken.None);
+            Check(calls == 2 && outcomes.Count == 2 && outcomes[^1] is null, "model error prevented the next successful quiet wake attempt");
+        }
+    }
+
+    private static async Task ParserRecovery()
+    {
+        foreach (var audit in new[] { false, true })
+        {
+            using var folder = new Folder();
+            var store = folder.Store();
+            var contacts = new ContactContextStore(folder.Root, () => folder.Now);
+            var clock = new FixedTime(folder.Now);
+            store.SaveSettings(new CompanionSettings { Audit = audit, Enabled = !audit });
+            contacts.AppendMessage(123, "user", "晚安", "m1", folder.Now.AddHours(-5));
+            var outcomes = new List<Exception?>();
+            var calls = 0;
+            var runtime = Runtime(store, contacts, clock, () => { }, [], "", replyFactory: _ => new InspectReply((_, _) =>
+                ++calls == 1 ? "not json" : audit ? "{\"mood\":\"平静\",\"entries\":[]}" : "{\"send\":false,\"text\":\"\"}"),
+                tickCompleted: outcomes.Add);
+            await runtime.TickAsync(CancellationToken.None);
+            Check(outcomes.Single() is InvalidDataException && store.Get(123).LastAuditAt is null && store.Get(123).AuditCursor is null,
+                "malformed model JSON was not reported without advancing progress");
+            folder.Now = folder.Now.AddMinutes(11);
+            clock.Now = folder.Now;
+            await runtime.TickAsync(CancellationToken.None);
+            Check(calls == 2 && outcomes.Count == 2 && outcomes[^1] is null, "malformed JSON prevented the next successful tick");
+            Check(!audit || store.Get(123).AuditCursor is not null, "valid journal retry never committed its progress");
+        }
+    }
+
+    private static async Task ExternalCancellation()
+    {
+        using var folder = new Folder();
+        using var stop = new CancellationTokenSource();
+        var store = folder.Store();
+        var contacts = new ContactContextStore(folder.Root, () => folder.Now);
+        var clock = new FixedTime(folder.Now);
+        store.SaveSettings(new CompanionSettings { Audit = false, Enabled = true });
+        contacts.AppendMessage(123, "user", "晚安", "m1", folder.Now.AddHours(-5));
+        var outcomes = new List<Exception?>();
+        var runtime = Runtime(store, contacts, clock, () => { }, [], "", replyFactory: _ => new InspectReply((_, token) =>
+        {
+            stop.Cancel();
+            token.ThrowIfCancellationRequested();
+            return "{\"send\":true,\"text\":\"不应发送\"}";
+        }), tickCompleted: outcomes.Add);
+        try { await runtime.TickAsync(stop.Token); throw new Exception("external cancellation was swallowed"); }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        Check(outcomes.Count == 0 && store.Get(123).WakeupsToday == 0, "cancelled tick reported success or advanced wake state");
+    }
+
     private static CompanionRuntime Runtime(CompanionStore store, ContactContextStore contacts, FixedTime clock,
         Action onCall, List<string> delivered, string text, Func<bool>? paused = null, Func<bool>? busy = null,
-        Func<int>? pending = null, long user = 123) =>
+        Func<int>? pending = null, long user = 123, Func<string, IStreamingReply>? replyFactory = null,
+        Action<Exception?>? tickCompleted = null) =>
         new(store, contacts, new PersonaSettings { Name = "大肥鱼" },
-            _ => { onCall(); return new FixedReply(text); },
+            prompt => { onCall(); return replyFactory?.Invoke(prompt) ?? new FixedReply(text); },
             () => new GroupChatStatus(GroupChatMode.Active, paused?.Invoke() ?? false, 0, [])
             {
                 PrivateContacts = [new PrivateChatContactStatus(user, busy?.Invoke() ?? false, false, null, 0, 0, 0)
                     { PendingMessages = pending?.Invoke() ?? 0 }]
             },
             (_, body, _) => { delivered.Add(body); return Task.CompletedTask; },
-            [user], true, (_, _) => { }, clock);
+            [user], true, (_, _) => { }, clock, tickCompleted);
 
-    private static int LocalHour(DateTimeOffset now) => TimeZoneInfo.ConvertTime(now, TimeZoneInfo.Local).Hour;
+    private static int LocalHour(DateTimeOffset now) => CompanionStore.ShanghaiTime(now).Hour;
+
+    private sealed class InspectReply(Func<IReadOnlyList<ChatTurn>, CancellationToken, string> output) : IStreamingReply
+    {
+        public async IAsyncEnumerable<string> StreamAsync(IReadOnlyList<ChatTurn> history, [EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.CompletedTask;
+            ct.ThrowIfCancellationRequested();
+            yield return output(history, ct);
+        }
+    }
 
     private sealed class FixedTime(DateTimeOffset now) : TimeProvider
     {
@@ -293,7 +540,7 @@ public static class CompanionChecks
         var now = DateTimeOffset.Now;
         var boundary = CompanionStore.AuditBoundary(now, 4);
         Check(boundary <= now && now - boundary <= TimeSpan.FromDays(1), "audit boundary was not within the last day");
-        Check(boundary.ToLocalTime().Hour == 4 && boundary.Minute == 0, "audit boundary ignored the configured hour");
+        Check(CompanionStore.ShanghaiTime(boundary).Hour == 4 && boundary.Minute == 0, "audit boundary ignored the configured Shanghai hour");
         return Task.CompletedTask;
     }
 

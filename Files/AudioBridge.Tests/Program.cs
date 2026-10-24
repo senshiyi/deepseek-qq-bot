@@ -1,12 +1,15 @@
 using AudioBridge;
 using NAudio.Wave;
 
+if (args is ["--runner-probe", var probeMode, var probePort])
+    return await SuiteProcessChecks.ProbeAsync(probeMode, int.Parse(probePort, System.Globalization.CultureInfo.InvariantCulture));
 if (args is ["--admin-preview"]) { await AdminHttpChecks.PreviewAsync(); return 0; }
 if (args is ["--vision-probe"]) return await VisionProbe.RunAsync();
 if (args is ["--vision-probe", var probeImage]) return await VisionProbe.RunAsync(probeImage);
 
 var tests = new (string Name, Func<Task> Body)[]
 {
+    ("isolated suite timeout releases resources before the next suite", SuiteProcessChecks.RunAsync),
     ("replacement waits for cancelled player cleanup", Replacement),
     ("stop cancels output and dispose is idempotent", StopAndDispose),
     ("mute stops current output and never resumes old data", Mute),
@@ -50,19 +53,30 @@ var tests = new (string Name, Func<Task> Body)[]
     ("admin: private history retention and approved public preferences", async () => { await ContactContextChecks.RunAsync(); }),
     ("admin: explicit private memory requests require review", async () => { await MemorySuggestionChecks.RunAsync(); }),
     ("admin: companion mood, diary forgetting and wake gate", async () => { await CompanionChecks.RunAsync(); }),
+    ("admin: observable background lifecycle and model failures", BackgroundRuntimeChecks.RunAsync),
     ("admin: bounded history-to-persona drafts and cancellation", async () => { await PersonaLearningChecks.RunAsync(); }),
     ("admin: persona isolation and bounded model output", async () => { await AdminReplyChecks.RunAsync(); }),
     ("admin: loopback HTTP and application lifecycle", async () => { await AdminHttpChecks.RunAsync(); }),
     ("admin: QQ favorites selections and bounded downloads", async () => { await QqEmojiChecks.RunAsync(); })
 };
+if (args is ["--case", var caseText] && int.TryParse(caseText, out var caseIndex) && caseIndex >= 0 && caseIndex < tests.Length)
+{
+    try { await tests[caseIndex].Body(); return 0; }
+    catch (Exception error) { Console.Error.WriteLine(error); return 1; }
+}
 var selectedTests = args.Length == 2 && args[0] == "--suite" && args[1] is "messaging" or "admin"
-    ? tests.Where(t => t.Name.StartsWith(args[1] + ":", StringComparison.Ordinal)).ToArray()
-    : args.Length == 0 ? tests : throw new ArgumentException("支持--suite messaging / admin，或不传参数运行全部无硬件检查。");
+    ? tests.Select((test, index) => (test.Name, Index: index)).Where(t => t.Name.StartsWith(args[1] + ":", StringComparison.Ordinal)).ToArray()
+    : args.Length == 0 ? tests.Select((test, index) => (test.Name, Index: index)).ToArray()
+    : throw new ArgumentException("支持--suite messaging / admin，或不传参数运行全部无硬件检查。");
 var failed = 0;
 foreach (var test in selectedTests)
 {
-    try { await test.Body().WaitAsync(TimeSpan.FromSeconds(10)); Console.WriteLine($"PASS {test.Name}"); }
-    catch (Exception error) { failed++; Console.Error.WriteLine($"FAIL {test.Name}: {error}"); }
+    // Each suite owns a process. A timeout must release its ports and workers before the next suite starts.
+    var result = await SuiteProcessRunner.RunAsync(["--case", test.Index.ToString(System.Globalization.CultureInfo.InvariantCulture)], TimeSpan.FromSeconds(90));
+    Console.Write(result.Output);
+    Console.Error.Write(result.Error);
+    if (result.ExitCode == 0 && !result.TimedOut) Console.WriteLine($"PASS {test.Name}");
+    else { failed++; Console.Error.WriteLine($"FAIL {test.Name}: {(result.TimedOut ? "suite exceeded 90 seconds; child process exited before continuing" : $"exit {result.ExitCode}")}"); }
 }
 Console.WriteLine($"{selectedTests.Length - failed}/{selectedTests.Length} suites passed. No audio hardware opened; no real QQ messages sent.");
 return failed == 0 ? 0 : 1;

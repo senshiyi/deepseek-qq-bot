@@ -90,10 +90,14 @@ public static class DiaryLevels
 public sealed record DiaryEntry(string Id, string Level, string Text, string Mood, string Unsaid,
     DateTimeOffset CreatedAt, DateTimeOffset? ExpiresAt);
 
+public sealed record CompanionAuditCursor(string MessageId, DateTimeOffset At);
+
 public sealed record CompanionSnapshot(long UserId, string Mood, DateTimeOffset? MoodUpdatedAt,
     DateTimeOffset? LastAuditAt, DateTimeOffset? LastWakeupAt, int WakeupsToday,
     IReadOnlyList<DiaryEntry> Entries)
 {
+    public CompanionAuditCursor? AuditCursor { get; init; }
+    public bool AuditPending { get; init; }
     public static CompanionSnapshot Empty(long userId) => new(userId, "", null, null, null, 0, []);
 }
 
@@ -216,7 +220,45 @@ public sealed class CompanionStore
         ValidateUserId(userId);
         WithLock(() =>
         {
-            Persist(userId, LoadDocument(userId) with { LastAuditAt = at });
+            Persist(userId, LoadDocument(userId) with { LastAuditAt = at, AuditPending = false });
+            return true;
+        });
+    }
+
+    /// <summary>一批日记、心情及消息进度一起落盘；容量不足或写入失败时不推进进度。</summary>
+    public void ApplyAuditBatch(long userId, JournalDraft draft, CompanionAuditCursor cursor, DateTimeOffset? completedAt)
+    {
+        ValidateUserId(userId);
+        ArgumentNullException.ThrowIfNull(draft);
+        ArgumentNullException.ThrowIfNull(cursor);
+        ValidateCursor(cursor);
+        var mood = Clean(draft.Mood, MaximumMoodCharacters, "心情", false);
+        if (draft.Entries.Count > CompanionJournal.MaximumEntriesPerDraft) throw new ArgumentException("本批日记条数无效。");
+        var normalized = draft.Entries.Select(entry =>
+        {
+            if (!DiaryLevels.IsValid(entry.Level)) throw new ArgumentException("日记等级无效。");
+            return new DiaryDraft(entry.Level, Clean(entry.Text, MaximumTextCharacters, "日记内容", true),
+                Clean(entry.Mood, MaximumMoodCharacters, "当时心情", false),
+                Clean(entry.Unsaid, MaximumUnsaidCharacters, "没说出口的话", false));
+        }).ToArray();
+        WithLock(() =>
+        {
+            var now = clock();
+            var document = LoadDocument(userId);
+            var entries = Prune(document.Entries, now);
+            if (entries.Count + normalized.Length > MaximumEntriesPerContact)
+                throw new ArgumentException("这位联系人的日记已达上限，请先删除部分条目。");
+            entries.AddRange(normalized.Select(entry => new DiaryEntry(Guid.NewGuid().ToString("D"), entry.Level,
+                entry.Text, entry.Mood, entry.Unsaid, now, DiaryLevels.Expiry(entry.Level, now))));
+            Persist(userId, document with
+            {
+                Entries = entries.OrderBy(entry => entry.CreatedAt).ToList(),
+                Mood = mood.Length == 0 ? document.Mood : mood,
+                MoodUpdatedAt = mood.Length == 0 ? document.MoodUpdatedAt : now,
+                AuditCursor = cursor,
+                AuditPending = completedAt is null,
+                LastAuditAt = completedAt ?? document.LastAuditAt
+            });
             return true;
         });
     }
@@ -228,8 +270,7 @@ public sealed class CompanionStore
         {
             var now = clock();
             var document = LoadDocument(userId);
-            var day = now.UtcDateTime.Date;
-            var sameDay = document.WakeupDay is { } previous && previous.UtcDateTime.Date == day;
+            var sameDay = document.WakeupDay is { } previous && ShanghaiTime(previous).Date == ShanghaiTime(now).Date;
             Persist(userId, document with
             {
                 LastWakeupAt = now,
@@ -280,7 +321,7 @@ public sealed class CompanionStore
         builder.Append("近期日记：\n");
         foreach (var entry in snapshot.Entries.OrderByDescending(item => item.CreatedAt).Take(8))
         {
-            var line = "- [" + DiaryLevels.Label(entry.Level) + "] " + entry.CreatedAt.ToLocalTime().ToString("MM-dd HH:mm", CultureInfo.InvariantCulture) +
+            var line = "- [" + DiaryLevels.Label(entry.Level) + "] " + ShanghaiTime(entry.CreatedAt).ToString("MM-dd HH:mm", CultureInfo.InvariantCulture) +
                 " " + entry.Text + (entry.Mood.Length == 0 ? "" : "（当时心情：" + entry.Mood + "）") +
                 (entry.Unsaid.Length == 0 ? "" : "（没说出口：" + entry.Unsaid + "）") + "\n";
             if (builder.Length + line.Length > maxCharacters) break;
@@ -300,24 +341,31 @@ public sealed class CompanionStore
         if (lastMessageAt is not { } last) return false;
         if (now - last < TimeSpan.FromMinutes(settings.IdleMinutes)) return false;
         if (snapshot.LastWakeupAt is { } woken && now - woken < TimeSpan.FromMinutes(settings.CooldownMinutes)) return false;
-        if (snapshot.WakeupsToday >= settings.DailyLimit) return false;
+        var wakeups = snapshot.LastWakeupAt is { } previous && ShanghaiTime(previous).Date != ShanghaiTime(now).Date
+            ? 0 : snapshot.WakeupsToday;
+        if (wakeups >= settings.DailyLimit) return false;
         return true;
     }
 
     /// <summary>一天里的整理时刻；未到当天时刻时返回昨天的同一时刻。</summary>
     public static DateTimeOffset AuditBoundary(DateTimeOffset now, int hour)
     {
-        var local = TimeZoneInfo.ConvertTime(now, TimeZoneInfo.Local);
+        var local = ShanghaiTime(now);
         var boundary = new DateTimeOffset(local.Date.AddHours(hour), local.Offset);
         return boundary > now ? new DateTimeOffset(local.Date.AddDays(-1).AddHours(hour), local.Offset) : boundary;
     }
+
+    // 上海现行民用时间固定为 UTC+8，不依赖运行机器的时区设置。
+    public static DateTimeOffset ShanghaiTime(DateTimeOffset at) => at.ToOffset(TimeSpan.FromHours(8));
 
     private CompanionSnapshot Snapshot(CompanionDocument document, DateTimeOffset now)
     {
         var entries = Prune(document.Entries, now);
         if (entries.Count != document.Entries.Count) Persist(document.UserId, document with { Entries = entries });
+        var wakeups = document.WakeupDay is { } day && ShanghaiTime(day).Date == ShanghaiTime(now).Date
+            ? document.WakeupsToday : 0;
         return new(document.UserId, document.Mood, document.MoodUpdatedAt, document.LastAuditAt,
-            document.LastWakeupAt, document.WakeupsToday, entries);
+            document.LastWakeupAt, wakeups, entries) { AuditCursor = document.AuditCursor, AuditPending = document.AuditPending };
     }
 
     private static List<DiaryEntry> Prune(List<DiaryEntry> entries, DateTimeOffset now) =>
@@ -379,6 +427,8 @@ public sealed class CompanionStore
         if (document.Version != 1 || document.UserId != userId) throw new ArgumentException("心脑数据版本或联系人无效。");
         if (document.Entries is null || document.Entries.Count > MaximumEntriesPerContact) throw new ArgumentException("日记条数无效。");
         if ((document.Mood ?? "").Length > MaximumMoodCharacters) throw new ArgumentException("心情超长。");
+        if (document.AuditCursor is { } cursor) ValidateCursor(cursor);
+        if (document.AuditPending && document.AuditCursor is null) throw new ArgumentException("日记整理进度无效。");
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in document.Entries)
         {
@@ -390,6 +440,12 @@ public sealed class CompanionStore
                 (entry.Mood ?? "").Length > MaximumMoodCharacters || (entry.Unsaid ?? "").Length > MaximumUnsaidCharacters)
                 throw new ArgumentException("日记内容超长或为空。");
         }
+    }
+
+    private static void ValidateCursor(CompanionAuditCursor cursor)
+    {
+        if (!Guid.TryParseExact(cursor.MessageId, "D", out var id) || id == Guid.Empty || cursor.At == default)
+            throw new ArgumentException("日记消息进度无效。");
     }
 
     private static string Clean(string value, int maximum, string label, bool required)
@@ -445,6 +501,8 @@ public sealed class CompanionStore
         public string Mood { get; init; } = "";
         public DateTimeOffset? MoodUpdatedAt { get; init; }
         public DateTimeOffset? LastAuditAt { get; init; }
+        public CompanionAuditCursor? AuditCursor { get; init; }
+        public bool AuditPending { get; init; }
         public DateTimeOffset? LastWakeupAt { get; init; }
         public DateTimeOffset? WakeupDay { get; init; }
         public int WakeupsToday { get; init; }
