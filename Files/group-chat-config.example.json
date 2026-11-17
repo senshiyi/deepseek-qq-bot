@@ -15,5 +15,7 @@
   "botNames": ["小深", "机器人"],
   "mode": "mention",
   "engine": "deepseek",
+  "apiBudgetYuan": 0.30,
+  "maxApiCalls": 10,
   "memeDirectory": "Files/Memes"
 }

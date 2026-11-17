@@ -14,6 +14,7 @@ public sealed partial class LocalAdminServer
         contacts = companion.All().Select(item => new
         {
             item.UserId, item.Mood, item.MoodUpdatedAt, item.LastAuditAt, item.LastWakeupAt, item.WakeupsToday,
+            item.Affection, item.Possession,
             entries = item.Entries.Select(entry => new
             {
                 entry.Id, entry.Level, levelLabel = DiaryLevels.Label(entry.Level), entry.Text, entry.Mood,
@@ -26,6 +27,16 @@ public sealed partial class LocalAdminServer
     {
         var deleted = companion.DeleteEntry(userId, id);
         await JsonAsync(context.Response, new { deleted }, 200, ct);
+    }
+
+    /// <summary>人工调好感度（-1000～1000）/占有欲（0～100），越界拒绝。</summary>
+    private async Task SaveCompanionMetersAsync(HttpListenerContext context, long userId, JsonElement body, CancellationToken ct)
+    {
+        var affection = body.GetProperty("affection").GetInt32();
+        var possession = body.GetProperty("possession").GetInt32();
+        companion.SetMeters(userId, affection, possession);
+        var snapshot = companion.Get(userId);
+        await JsonAsync(context.Response, new { snapshot.UserId, snapshot.Affection, snapshot.Possession }, 200, ct);
     }
 
     private async Task SaveCompanionSettingsAsync(HttpListenerContext context, JsonElement body, CancellationToken ct)

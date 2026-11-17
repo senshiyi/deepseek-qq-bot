@@ -21,9 +21,12 @@ public static class ContactContextChecks
             ("group preference reads only manually approved fixed public fields", PublicPreferences),
             ("damaged private history cannot leak into group or other contacts", CorruptionIsolation),
             ("concurrent store instances keep independent transcript writes", ConcurrentInstances),
-            ("private context is limited to six entries and 3000 characters", ContextBounds),
+            ("private context keeps the newest two days of chat inside 3000 characters", ContextBounds),
             ("invalid identifiers and public fields reject without writing", InvalidValues),
             ("record count, per-file bytes and contact file count stay bounded", ResourceBounds),
+            ("image captions attach to the private [图片] placeholder once", ImageNotes),
+            ("received images are stored for the panel and expire with the transcript", ImageFiles),
+            ("group and private lines keep their source apart", Channels),
             ("linked history and directory paths cannot escape the project", LinkedPaths)
         };
         foreach (var check in checks)
@@ -74,6 +77,74 @@ public static class ContactContextChecks
         Check(File.ReadAllText(noncanonical) == "unmanaged-noncanonical-file", "purge interpreted a noncanonical path as a contact");
         Check(store.PurgeExpiredHistory() == new HistoryPurgeResult(3, 0, 0, 1), "repeat purge changed live data or hid damaged contact");
         Check(!System.IO.Directory.EnumerateFiles(folder.Directory, "*.tmp").Any(), "purge retained a private temporary backup");
+        return Task.CompletedTask;
+    }
+
+    private static Task Channels()
+    {
+        using var folder = new Folder();
+        var store = folder.Store();
+        store.AppendMessage(123, "user", "私聊一句", "1", folder.Now.AddMinutes(-2));
+        store.AppendMessage(123, "user", ContactContextStore.GroupMarker + "群里一句", "2", folder.Now.AddMinutes(-1));
+        var all = store.Recent(123);
+        Check(all.Count == 2 && ContactContextStore.ChannelOf(all[0]) == "private" &&
+            ContactContextStore.ChannelOf(all[1]) == "group" && ContactContextStore.BodyOf(all[1]) == "群里一句",
+            "the archive lost the source or kept the group marker in the body");
+        var context = store.BuildPrivateHistoryContext(123);
+        Check(context.Contains("用户（群聊）：群里一句", StringComparison.Ordinal) &&
+            context.Contains("用户：私聊一句", StringComparison.Ordinal) &&
+            !context.Contains("[群聊]", StringComparison.Ordinal),
+            "the model context did not label the group line or still shows the raw marker");
+        return Task.CompletedTask;
+    }
+
+    private static Task ImageNotes()
+    {
+        using var folder = new Folder();
+        var store = folder.Store();
+        Check(!store.AnnotateLatestImage(123, "没有图可标"), "an annotation claimed to write without an image message");
+        store.AppendMessage(123, "user", "[图片]", "9", folder.Now.AddMinutes(-2));
+        store.AppendMessage(123, "assistant", "好看", "10", folder.Now.AddMinutes(-1));
+        Check(store.AnnotateLatestImage(123, "蓝绿双马尾的小家伙趴着\n枕头"), "the caption was not attached to the image message");
+        Check(store.Recent(123).First(x => x.MessageId == "9").Text == "[图片]（图片内容：蓝绿双马尾的小家伙趴着 枕头）",
+            "the caption text or its whitespace normalization is wrong");
+        Check(!store.AnnotateLatestImage(123, "第二遍"), "the same image was annotated twice");
+        store.AppendMessage(123, "user", "[图片]", "11");
+        Check(store.AnnotateLatestImage(123, new string('长', 1200)) && store.Recent(123).All(x => x.Text.Length <= 1000),
+            "a long caption overflowed the transcript text limit");
+        // 群聊图和白名单联系人的私聊图存在同一个文件里，按消息ID标才不会标错行。
+        store.AppendMessage(123, "user", "[群聊] [图片]", "21", folder.Now.AddMinutes(-1));
+        store.AppendMessage(123, "user", "[图片]", "22", folder.Now.AddSeconds(-30));
+        Check(store.AnnotateLatestImage(123, "群里的猫", 21) &&
+              store.Recent(123).First(x => x.MessageId == "21").Text == "[群聊] [图片]（图片内容：群里的猫）",
+            "a group image line was not annotated by its message id");
+        Check(store.Recent(123).First(x => x.MessageId == "22").Text == "[图片]", "annotating by id touched another image line");
+        Check(!store.AnnotateLatestImage(123, "群里的猫", 21), "the same group image was annotated twice");
+        Check(store.AnnotateLatestImage(123, "私聊的图", 22), "a private image line was not annotated by its message id");
+        return Task.CompletedTask;
+    }
+
+    private static Task ImageFiles()
+    {
+        using var folder = new Folder();
+        var store = folder.Store();
+        var png = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A };
+        store.SaveImage(123, "77", "image/png", png);
+        Check(store.HasImage(123, "77") && store.TryReadImage(123, "77", out var read, out var mime) &&
+              read.SequenceEqual(png) && mime == "image/png", "a stored image could not be read back");
+        Check(!store.HasImage(123, "78") && !store.TryReadImage(123, "78", out _, out _),
+            "an unknown message reported a stored image");
+        Reject(() => store.SaveImage(123, "../77", "image/png", png));
+        Reject(() => store.SaveImage(123, "7a", "image/png", png));
+        Reject(() => store.SaveImage(123, "77", "text/html", png));
+        Reject(() => store.SaveImage(123, "77", "image/png", []));
+        Reject(() => store.SaveImage(0, "77", "image/png", png));
+        folder.Now = DateTimeOffset.UtcNow.AddDays(8);
+        Check(!store.TryReadImage(123, "77", out _, out _), "an expired image was still readable");
+        folder.Now = InitialNow;
+        store.SaveImage(123, "79", "image/jpeg", png);
+        store.DeleteHistory(123);
+        Check(!store.HasImage(123, "79"), "deleting a contact's transcript left its images behind");
         return Task.CompletedTask;
     }
 
@@ -258,12 +329,16 @@ public static class ContactContextChecks
     {
         using var folder = new Folder();
         var store = folder.Store();
-        for (var i = 0; i < 10; i++) store.AppendMessage(123, i % 2 == 0 ? "user" : "assistant", "entry-" + i + ":" + new string('中', 980), i.ToString(), folder.Now.AddMinutes(i - 10));
+        for (var i = 0; i < 20; i++) store.AppendMessage(123, i % 2 == 0 ? "user" : "assistant", "entry-" + i + ":" + new string('中', 980), i.ToString(), folder.Now.AddMinutes(i - 20));
+        store.AppendMessage(123, "user", "stale-before-window", "old", folder.Now.AddDays(-3));
         var context = store.BuildPrivateHistoryContext(123);
-        Check(context.Length <= 3000 && !context.Contains("entry-3:", StringComparison.Ordinal) && context.Contains("entry-4:", StringComparison.Ordinal) && context.Contains("entry-9:", StringComparison.Ordinal), "private context did not retain latest six inside character limit");
-        var excluded = store.BuildPrivateHistoryContext(123, new[] { "8", "9" });
-        Check(!excluded.Contains("entry-8:", StringComparison.Ordinal) && !excluded.Contains("entry-9:", StringComparison.Ordinal) && excluded.Contains("entry-7:", StringComparison.Ordinal), "current-message exclusion failed");
-        Check(store.Recent(123).Count == 10, "prompt clipping changed persisted raw history");
+        Check(context.Length <= 3000 && context.Contains("现在：", StringComparison.Ordinal) &&
+              context.Contains("entry-19:", StringComparison.Ordinal) && !context.Contains("entry-0:", StringComparison.Ordinal) &&
+              !context.Contains("stale-before-window", StringComparison.Ordinal),
+            "private context did not keep the newest chat, the clock line or the two-day window");
+        var excluded = store.BuildPrivateHistoryContext(123, new[] { "18", "19" });
+        Check(!excluded.Contains("entry-18:", StringComparison.Ordinal) && !excluded.Contains("entry-19:", StringComparison.Ordinal) && excluded.Contains("entry-17:", StringComparison.Ordinal), "current-message exclusion failed");
+        Check(store.Recent(123).Count == 21, "prompt clipping changed persisted raw history");
         return Task.CompletedTask;
     }
 

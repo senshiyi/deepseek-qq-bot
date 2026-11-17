@@ -9,7 +9,16 @@ public enum GroupChatMode { Mention, Active, Manual }
 public enum GroupChatTrigger { Unspecified, Private, Mention, Name, Ambient }
 
 public sealed record ParsedGroupMessage(long GroupId, long SenderId, long MessageId,
-    DateTimeOffset At, string Text, bool Mentioned, bool ImageSeen, bool IsPrivate = false);
+    DateTimeOffset At, string Text, bool Mentioned, bool ImageSeen, bool IsPrivate = false)
+{
+    /// <summary>群名片或昵称，只用来让模型分清谁在说话；空字符串表示只有QQ号。</summary>
+    public string DisplayName { get; init; } = "";
+    /// <summary>语音消息的 OneBot 文件标识；只交给 get_record 转换，不解析成路径。</summary>
+    public string? VoiceFile { get; init; }
+
+    /// <summary>这条消息明确@了别人（不是本账号）：那是对别人说的话，不插话。</summary>
+    public bool AddressedElsewhere { get; init; }
+}
 
 public sealed record GroupChatPolicyOptions
 {
@@ -73,6 +82,7 @@ public sealed class GroupChatPolicy
     public const int MaximumSegments = 64;
     public const int MaximumTextCharacters = 1000;
     public const int MaximumContextMessages = 20;
+    private const int MaximumSenderNameCharacters = 24;
     public const int MaximumContextCharacters = 4000;
     public const int MaximumSeenEvents = 2048;
     public static readonly TimeSpan MaximumEventAge = TimeSpan.FromMinutes(2);
@@ -150,13 +160,15 @@ public sealed class GroupChatPolicy
 
         var text = new StringBuilder();
         var mentioned = false;
+        var addressedElsewhere = false;
         var imageSeen = false;
+        string? voiceFile = null;
         foreach (var segment in segments.EnumerateArray())
         {
             if (segment.ValueKind != JsonValueKind.Object || !segment.TryGetProperty("type", out var kind) ||
                 kind.ValueKind != JsonValueKind.String) return false;
             var type = kind.GetString();
-            if (type is not ("text" or "at" or "face" or "image")) continue;
+            if (type is not ("text" or "at" or "face" or "image" or "record")) continue;
             if (!segment.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object) return false;
             switch (type)
             {
@@ -170,7 +182,11 @@ public sealed class GroupChatPolicy
                     {
                         if (!TryId(data, "qq", out var target)) return false;
                         if (target == options.SelfId) { mentioned = true; AppendBounded(text, "[@机器人]"); }
-                        else AppendBounded(text, "[@成员]");
+                        else
+                        {
+                            addressedElsewhere = true;
+                            AppendBounded(text, "[@成员" + target.ToString(CultureInfo.InvariantCulture) + "]");
+                        }
                     }
                     break;
                 case "face":
@@ -181,11 +197,19 @@ public sealed class GroupChatPolicy
                     imageSeen = true;
                     AppendBounded(text, "[图片]"); // Never read a URL, file, CQ code, or embedded payload.
                     break;
+                case "record":
+                    if (!data.TryGetProperty("file", out var record) || record.ValueKind != JsonValueKind.String) return false;
+                    var file = record.GetString() ?? "";
+                    if (file.Length is < 1 or > 256 || file.Any(char.IsControl)) return false;
+                    voiceFile ??= file;
+                    AppendBounded(text, "[语音]"); // 只留占位；真正的文字由 get_record + 本地识别取得。
+                    break;
             }
         }
         var content = text.ToString().Trim();
         if (content.Length == 0) { rejection = "empty_supported_content"; return false; }
-        parsed = new(group, sender, messageId, at, content, mentioned, imageSeen, isPrivate);
+        parsed = new(group, sender, messageId, at, content, mentioned, imageSeen, isPrivate)
+            { DisplayName = SenderName(senderObject), VoiceFile = voiceFile, AddressedElsewhere = addressedElsewhere };
         rejection = null;
         return true;
     }
@@ -237,6 +261,8 @@ public sealed class GroupChatPolicy
             }
             var trigger = ClassifyTrigger(message);
             var addressed = trigger != GroupChatTrigger.Ambient;
+            // 明确@了别人的消息是私事：主动参与也不插话，也不占主动参与的名额。
+            if (!addressed && message.AddressedElsewhere) return Reject("addressed_elsewhere", state);
             if (!addressed && (options.Mode == GroupChatMode.Mention || !IsActiveCandidate(message.Text)))
                 return Reject("not_a_candidate", state);
             if (!addressed)
@@ -547,6 +573,22 @@ public sealed class GroupChatPolicy
 
     private static string CleanText(string text) => new string(text.Where(ch => !char.IsControl(ch) || ch is '\n' or '\t').ToArray())
         .Replace("[CQ:", "[文本CQ:", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>群名片优先、昵称其次；压掉换行和控制字符并限长，名字只是数据不是指令。</summary>
+    private static string SenderName(JsonElement sender)
+    {
+        var name = "";
+        foreach (var field in new[] { "card", "nickname" })
+        {
+            if (!sender.TryGetProperty(field, out var value) || value.ValueKind != JsonValueKind.String) continue;
+            name = value.GetString() ?? "";
+            if (!string.IsNullOrWhiteSpace(name)) break;
+        }
+        var clean = string.Join(' ', CleanText(name).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (clean.Length > MaximumSenderNameCharacters)
+            clean = clean[..(char.IsHighSurrogate(clean[MaximumSenderNameCharacters - 1]) ? MaximumSenderNameCharacters - 1 : MaximumSenderNameCharacters)];
+        return clean;
+    }
 
     private static void AppendBounded(StringBuilder text, string value)
     {

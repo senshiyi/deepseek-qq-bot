@@ -7,6 +7,10 @@ public sealed record GroupChatSettings
     public const int MinimumIntervalSeconds = 3;
     public const int MaximumIntervalSeconds = 3600;
     public const int MaximumPerHour = 120;
+    public const double MinimumApiBudgetYuan = 0.01;
+    public const double MaximumApiBudgetYuan = 100;
+    public const int MinimumApiCalls = 1;
+    public const int MaximumApiCalls = 1000;
 
     public string OneBotBaseUrl { get; init; } = "http://127.0.0.1:3000/";
     public int EventPort { get; init; } = 17801;
@@ -24,6 +28,10 @@ public sealed record GroupChatSettings
     public string[] BotNames { get; init; } = ["小深", "机器人"];
     public string Mode { get; init; } = "mention";
     public string Engine { get; init; } = "deepseek";
+    /// <summary>DeepSeek 本轮的累计金额上限（元），跨重启由账本保留；可在面板“模型预算”里调。</summary>
+    public double ApiBudgetYuan { get; init; } = 0.30;
+    /// <summary>DeepSeek 本轮的累计调用次数上限，跨重启由账本保留。</summary>
+    public int MaxApiCalls { get; init; } = 10;
     public string MemeDirectory { get; init; } = "Files/Memes";
 
     public static GroupChatSettings Load(string path)
@@ -52,10 +60,12 @@ public sealed record GroupChatSettings
             MentionIntervalSeconds is < MinimumIntervalSeconds or > MaximumIntervalSeconds || MentionPerHour is < 1 or > MaximumPerHour ||
             ActiveIntervalSeconds is < MinimumIntervalSeconds or > MaximumIntervalSeconds || ActivePerHour is < 1 or > MaximumPerHour ||
             ActiveMessageEvery is < 1 or > 20 ||
+            !double.IsFinite(ApiBudgetYuan) || ApiBudgetYuan is < MinimumApiBudgetYuan or > MaximumApiBudgetYuan ||
+            MaxApiCalls is < MinimumApiCalls or > MaximumApiCalls ||
             ActiveGroupId != 0 && !AllowedGroupIds.Contains(ActiveGroupId) ||
             BotNames is null || BotNames.Length is < 1 or > 4 || BotNames.Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 16) ||
             !string.Equals(MemeDirectory, "Files/Memes", StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("消息配置无效：需1～8个群号，私聊白名单最多16人且不含自身；各类回复间隔为3～3600秒、每小时上限为1～120次；主动机会每1～20条可用普通文字一次；表情库限定Files/Memes。");
+            throw new ArgumentException("消息配置无效：需1～8个群号，私聊白名单最多16人且不含自身；各类回复间隔为3～3600秒、每小时上限为1～120次；主动机会每1～20条可用普通文字一次；DeepSeek 金额上限为0.01～100元、调用次数1～1000次；表情库限定Files/Memes。");
         if (Engine is not ("deepseek" or "school")) throw new ArgumentException("群聊默认engine为deepseek或school。");
         _ = ParsedMode();
     }

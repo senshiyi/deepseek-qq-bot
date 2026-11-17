@@ -41,16 +41,6 @@
       "faceId": 6
     },
     {
-      "id": "qq_face_13",
-      "file": "",
-      "tags": [
-        "\u5472\u7259",
-        "\u5F00\u5FC3",
-        "\u7B11"
-      ],
-      "faceId": 13
-    },
-    {
       "id": "qq_face_14",
       "file": "",
       "tags": [
@@ -120,6 +110,48 @@
       "tags": [
         "\u5BB3\u7F9E",
         "\u4E0D\u597D\u610F\u601D"
+      ]
+    },
+    {
+      "id": "miku_04",
+      "file": "miku_04.gif",
+      "tags": [
+        "\u6311\u8845"
+      ]
+    },
+    {
+      "id": "self-3f15bb99d9ce",
+      "file": "self-3f15bb99d9ce.jpg",
+      "tags": [
+        "\u8138\u7EA2",
+        "\u4E0D\u597D\u610F\u601D"
+      ]
+    },
+    {
+      "id": "miku_05",
+      "file": "miku_05.jpg",
+      "tags": [
+        "\u5410\u820C\u5934",
+        "\u6311\u8845",
+        "\u8C03\u620F"
+      ]
+    },
+    {
+      "id": "miku_06",
+      "file": "miku_06.jpg",
+      "tags": [
+        "\u5410\u820C\u5934",
+        "\u6311\u8845",
+        "\u8C03\u620F",
+        "\u505A\u9B3C\u8138"
+      ]
+    },
+    {
+      "id": "meme_01",
+      "file": "meme_01.jpg",
+      "tags": [
+        "\u7591\u60D1\u4E0D\u89E3",
+        "\u95EE\u53F7"
       ]
     }
   ]

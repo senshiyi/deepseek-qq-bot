@@ -19,7 +19,8 @@ public static class ImageInboxChecks
             ("conflicting source replay cannot remain a unique image", SourceConflicts),
             ("metadata stays bounded without splitting image groups", Bounds),
             ("paths and non-HTTP images never become candidates", UnsafeUrls),
-            ("oversize and malformed event shapes do not enter memory", InvalidBodies)
+            ("oversize and malformed event shapes do not enter memory", InvalidBodies),
+            ("inline images decode to bytes only for well formed data urls", InlineDecode)
         };
         foreach (var check in checks) { check.Run(); Console.WriteLine("PASS image inbox: " + check.Name); }
         var inbox = new GroupImageInbox("123", "456");
@@ -29,6 +30,14 @@ public static class ImageInboxChecks
         Check(!inbox.IsRunning && inbox.Prefix == "http://127.0.0.1:17800/onebot/", "cancelled listener opened or prefix is not loopback");
         Console.WriteLine("PASS image inbox: cancelled startup opens no listener");
         return checks.Length + 1;
+    }
+
+    private static void InlineDecode()
+    {
+        Check(new InlineImage("image/png", "data:image/png;base64,iVBORw0KGgo=").TryDecode() is { Length: 8 },
+            "a well formed inline image did not decode");
+        Check(new InlineImage("image/png", "iVBORw0KGgo=").TryDecode() is null, "a bare base64 payload was accepted as a data url");
+        Check(new InlineImage("image/png", "data:image/png;base64,***").TryDecode() is null, "invalid base64 decoded into bytes");
     }
 
     private static void Scope()

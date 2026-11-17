@@ -15,8 +15,9 @@ internal sealed record ReceivedImageSelection(ReceivedImageCandidate Candidate, 
 /// </summary>
 public sealed class ReceivedImageInbox
 {
-    public const int MaximumItems = 48;
-    public static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(10);
+    public const int MaximumItems = 64;
+    // ponytail: 只在内存里保留最近一天的候选（图片链接由 QQ 提供，过期需重发）；要永久画廊再加落盘。
+    public static readonly TimeSpan Lifetime = TimeSpan.FromHours(24);
     private readonly object gate = new();
     private readonly TimeProvider timeProvider;
     private readonly Dictionary<string, ReceivedImageSelection> selections = new(StringComparer.Ordinal);

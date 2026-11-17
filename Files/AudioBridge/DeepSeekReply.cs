@@ -59,7 +59,7 @@ public sealed class ApiBudget
                     if (!double.IsFinite(reserved) || reserved < 0 || calls < 0) throw new IOException("预算记录无效；停止 API 调用。");
                 }
             if (calls >= maxCalls || reserved + costCeiling > limit)
-                throw new InvalidOperationException("达到本轮 DeepSeek 调用次数或0.30元累计预算上限。");
+                throw ReplyFailure.Tag(new InvalidOperationException("达到本轮 DeepSeek 调用次数或累计预算上限。"), "deepseek_budget");
             var next = new { reservedYuan = reserved + costCeiling, calls = calls + 1, limitYuan = limit,
                 accounting = "Conservative peak-price reservation; no refunds, not an account balance or bill.", at = DateTimeOffset.Now };
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(ledgerPath))!);
@@ -128,8 +128,9 @@ public sealed class DeepSeekReply : IStreamingReply, IInlineImageSink, IDisposab
             { throw new OperationCanceledException("DeepSeek 请求已取消，既有预算预留保留。", ct); }
             catch (Exception error) when (error is OperationCanceledException or HttpRequestException or JsonException or InvalidOperationException or DecoderFallbackException)
             {
-                // Match the school transport's failure boundary; never include network URLs or model text.
-                throw new IOException("DeepSeek 请求超时、失败或响应无效；既有预算预留保留，不自动重试。");
+                // 已经分类过的（HTTP 状态码）原样抛出；其余归为接口不可用，别把原因压成一句笼统的 io_error。
+                if (ReplyFailure.HasCode(error)) throw;
+                throw ReplyFailure.Tag(new IOException("DeepSeek 请求超时、失败或响应无效；既有预算预留保留，不自动重试。"), "deepseek_unavailable");
             }
             if (!next) yield break;
             yield return source.Current;
@@ -179,7 +180,18 @@ public sealed class DeepSeekReply : IStreamingReply, IInlineImageSink, IDisposab
         request.Content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
-            throw new HttpRequestException($"DeepSeek 请求失败（HTTP {(int)response.StatusCode}）；本轮停止，可检查密钥、余额或网络。");
+        {
+            var status = (int)response.StatusCode;
+            var code = status switch
+            {
+                401 or 403 => "deepseek_auth",
+                402 => "deepseek_balance",
+                429 => "deepseek_rate_limit",
+                400 or 413 or 422 => "deepseek_rejected",
+                _ => "deepseek_unavailable"
+            };
+            throw ReplyFailure.Tag(new IOException($"DeepSeek 请求失败（HTTP {status}）；本轮停止，可检查密钥、余额或网络。"), code);
+        }
         await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
         using var reader = new StreamReader(stream, Encoding.UTF8);
         var seenBytes = 0;

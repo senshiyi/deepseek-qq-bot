@@ -19,10 +19,13 @@ public static class GroupChatFlowChecks
             ("curated native face choices encode one QQ group or private message", NativeFaceResponse),
             ("confirmed same-session memes are suppressed for 120 seconds without losing text or crossing sessions", RecentMemeSessions),
             ("explicit repeated meme requests retain policy limits and send the requested asset", ExplicitRepeatedMeme),
+            ("multiple messages only when the model asks for lines", LineMessages),
             ("preview, failed sends and cancelled generations do not reserve a meme choice", UnsentMemeChoices),
             ("native faces absent from the registered library are rejected before HTTP", UnknownNativeFace),
             ("account change after generation pauses without a group send", AccountSwitch),
             ("independent budget instances reload the shared ledger", SharedBudget),
+            ("an ambient group reply quotes its trigger and direct replies do not", AmbientQuote),
+            ("a group reply uses the triggering contact's own persona only", GroupPersona),
             ("real loopback HMAC event reaches simulated OneBot once", HttpEndToEnd),
             ("runtime evaluates a pending ordinary message after cooldown without another event", PendingAmbientRuntime),
             ("chat duration rejects invalid values before starting", DurationValidation),
@@ -210,6 +213,47 @@ public static class GroupChatFlowChecks
         finally { Directory.Delete(directory, true); }
     }
 
+    private static async Task LineMessages()
+    {
+        var ids = new HashSet<string>();
+        var split = GroupChatBrain.Parse("{\"send\":true,\"lines\":[\"第一句\",\"第二句\"],\"memeId\":null}", ids);
+        Check(split.Messages is { Length: 2 } lines && lines[1] == "第二句" && split.Text == "第一句 第二句", "lines array did not become separate messages");
+        foreach (var invalid in new[] { "{\"send\":true,\"lines\":[\"一\"],\"text\":\"二\"}", "{\"send\":true,\"lines\":[\"一\",\"二\",\"三\",\"四\"]}",
+            "{\"send\":true,\"lines\":[\"一\",\" \"]}", "{\"send\":true,\"lines\":[1]}", "{\"send\":true,\"lines\":\"一\"}" })
+        {
+            var rejected = false;
+            try { GroupChatBrain.Parse(invalid, ids); } catch (InvalidDataException) { rejected = true; }
+            Check(rejected, "invalid lines decision accepted");
+        }
+        var directory = MakeLibrary();
+        try
+        {
+            foreach (var (response, expected) in new[]
+            {
+                ("{\"send\":true,\"text\":\"第一句\\n第二句\",\"memeId\":null}", 1),
+                ("{\"send\":true,\"lines\":[\"第一句\",\"第二句\"],\"memeId\":null}", 2)
+            })
+            {
+                var handler = new FakeApi();
+                using var client = new OneBotMessageClient("http://127.0.0.1:3000/", "fake", ["10"], handler);
+                var policy = Policy();
+                var brain = new GroupChatBrain(_ => new FixedReply(response), ["roger"]);
+                await using var responder = new GroupChatResponder(policy, brain, new MemeLibrary(directory), client, true, 99);
+                var outcome = await responder.HandleAsync(policy.Decide(Message(1)), default);
+                Check(outcome.Status == "api_accepted" && handler.Sends == expected && handler.Calls == expected + 1,
+                    "message count differs from the model decision");
+                if (expected == 2)
+                {
+                    using var sent = JsonDocument.Parse(handler.LastSendBody!);
+                    Check(sent.RootElement.GetProperty("message")[0].GetProperty("data").GetProperty("text").GetString() == "第二句",
+                        "the second message did not carry only the second line");
+                }
+                Check(policy.Snapshot().Groups.Single().ContextCount == 2, "multi-message reply entered own history more than once");
+            }
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     private static async Task ExplicitRepeatedMeme()
     {
         var directory = MakeLibrary();
@@ -222,7 +266,7 @@ public static class GroupChatFlowChecks
             var policy = new GroupChatPolicy(new() { AllowedGroupIds = [10], AllowedPrivateUserIds = [20], SelfId = 99,
                 BotNames = ["机器人"], PrivateInterval = TimeSpan.FromSeconds(3) }, () => now);
             var modelCalls = 0;
-            var brain = new GroupChatBrain(library.List, (_, _) => { modelCalls++; return new FixedReply(Json); },
+            var brain = new GroupChatBrain(library.List, (_, _, _) => { modelCalls++; return new FixedReply(Json); },
                 persona: new PersonaSettings { MemeProbabilityPercent = 1 });
             await using var responder = new GroupChatResponder(policy, brain, library, client, true, 99, clock: () => now);
             for (var index = 1; index <= 2; index++)
@@ -337,6 +381,56 @@ public static class GroupChatFlowChecks
         }
         finally { Directory.Delete(directory, true); }
         return Task.CompletedTask;
+    }
+
+    private static async Task GroupPersona()
+    {
+        var global = new PersonaSettings { Name = "大肥鱼", Personality = "全局性格", UserAddress = "主人",
+            SpeakingStyle = "自然中文", ReplyMaxCharacters = 3000, MemeProbabilityPercent = 100 };
+        var personal = global with { Name = "小米", Personality = "只属于21的性格", UserAddress = "同学", ReplyMaxCharacters = 40 };
+        var seen = new List<PersonaSettings?>();
+        var brain = new GroupChatBrain(() => [new MemeEntry("qq_face_0", "", ["微笑"], 0)],
+            (_, _, speakerPersona) => { seen.Add(speakerPersona); return new FixedReply("{\"send\":true,\"text\":\"" + new string('话', 80) + "\"}"); },
+            persona: global, personaFor: sender => sender == 21 ? personal : global);
+        var fromOther = new ParsedGroupMessage(10, 21, 1, DateTimeOffset.UtcNow, "你好呀", false, false);
+        var theirs = await brain.GenerateAsync([fromOther], default, fromOther);
+        Check(seen.Count == 1 && seen[0]?.Name == "小米", "the group reply did not use the triggering contact's own persona");
+        Check(theirs.Text.Length == 40, "the contact's own reply length was not applied");
+        var fromStranger = new ParsedGroupMessage(10, 33, 2, DateTimeOffset.UtcNow, "你好呀", false, false);
+        await brain.GenerateAsync([fromStranger], default, fromStranger);
+        Check(seen[^1]?.Name == "大肥鱼", "a stranger's group message lost the global persona");
+    }
+
+    private static async Task AmbientQuote()
+    {
+        var directory = MakeLibrary();
+        try
+        {
+            var handler = new FakeApi();
+            using var client = new OneBotMessageClient("http://127.0.0.1:3000/", "fake", ["10"], handler);
+            var now = DateTimeOffset.UtcNow;
+            var policy = new GroupChatPolicy(new()
+            {
+                AllowedGroupIds = [10], SelfId = 99, BotNames = ["机器人"], Mode = GroupChatMode.Active,
+                ActiveMessageEvery = 1, ActiveInterval = TimeSpan.FromSeconds(3), MentionInterval = TimeSpan.FromSeconds(3)
+            }, () => now);
+            await using var responder = new GroupChatResponder(policy, new GroupChatBrain(_ => new FixedReply(Json), ["roger"]),
+                new MemeLibrary(directory), client, true, 99);
+            var ambient = Message(7, "今天下雨了") with { Mentioned = false };
+            var decision = policy.Decide(ambient);
+            Check(decision.Trigger == GroupChatTrigger.Ambient, "fixture did not produce an ambient trigger: " + decision.Reason);
+            Check((await responder.HandleAsync(decision, default)).Status == "api_accepted", "ambient reply was not sent");
+            Check(handler.LastSendBody?.Contains("\"reply\"", StringComparison.Ordinal) == true &&
+                handler.LastSendBody.Contains("\"id\":\"7\"", StringComparison.Ordinal),
+                "an ambient group reply did not quote the message that triggered it");
+            now = now.AddSeconds(5);
+            var direct = policy.Decide(Message(8, "机器人你好"));
+            Check(direct.Trigger == GroupChatTrigger.Mention, "fixture did not produce a direct trigger");
+            Check((await responder.HandleAsync(direct, default)).Status == "api_accepted", "direct reply was not sent");
+            Check(handler.LastSendBody?.Contains("\"reply\"", StringComparison.Ordinal) == false,
+                "a direct @ reply was needlessly quoting");
+        }
+        finally { Directory.Delete(directory, true); }
     }
 
     private static async Task HttpEndToEnd()

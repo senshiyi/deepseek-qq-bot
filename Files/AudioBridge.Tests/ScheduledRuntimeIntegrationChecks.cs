@@ -326,7 +326,10 @@ public static class ScheduledRuntimeIntegrationChecks
                 OnceAt = fixture.Clock.Now.AddSeconds(1), Text = "PRIVATE_SCHEDULE_SENTINEL" }, [10], [20]);
             fixture.Clock.Now = fixture.Clock.Now.AddSeconds(2);
             await Until(() => fixture.Store.List().Count == 2 && fixture.Store.List().All(task => task.LastRun?.Status == "api_accepted"));
-            var archived = contacts.Recent(20).Single();
+            var transcript = contacts.Recent(20);
+            var archived = transcript.Single(message => message.Role == "assistant");
+            Check(transcript.Any(message => message.Role == "user" && message.Text == "[群聊] 机器人你好"),
+                "a whitelisted contact's group message was not archived into his own memory");
             snapshot = JsonSerializer.SerializeToElement(control.Snapshot(), BridgeConfig.JsonOptions);
             Check(archived.Role == "assistant" && archived.Text == "PRIVATE_SCHEDULE_SENTINEL" && sends == 3 &&
                 snapshot.GetProperty("policy").GetProperty("privateContacts")[0].GetProperty("contextCount").GetInt32() == 1 &&

@@ -25,6 +25,7 @@ public static class ChatApplicationHost
         string? hostError = null;
         Task? delayedStop = null;
         var selectedEngine = engine;
+        var currentSettings = initial;
         IStreamingReply PersonaReply(string prompt)
         {
             var activeEngine = Volatile.Read(ref selectedEngine);
@@ -38,7 +39,7 @@ public static class ChatApplicationHost
             }
             if (activeEngine == "deepseek")
                 return new DeepSeekReply(BotSettings.LoadApiKey(project) ?? throw new InvalidOperationException("DeepSeek密钥未配置。"),
-                    new ApiBudget(Path.Combine(local, "deepseek-budget.json"), .30, 10),
+                    new ApiBudget(Path.Combine(local, "deepseek-budget.json"), currentSettings.ApiBudgetYuan, currentSettings.MaxApiCalls),
                     systemPrompt: prompt, jsonMode: true, maximumOutputTokens: 2048);
             throw new InvalidOperationException("当前预览引擎不调用模型，请先选择已配置的文字模型。");
         }
@@ -67,7 +68,7 @@ public static class ChatApplicationHost
         var maintenance = PurgeHistoryAsync(contacts, lifetime.Token);
         var settings = initial;
         var selectedGroup = groupId;
-        Console.WriteLine($"本地管理面板：{admin.Prefix}；双击 open-panel.cmd 自动登录。语音保持暂停。");
+        Console.WriteLine($"本地管理面板：{admin.Prefix}；双击 open-panel.cmd 自动登录。电脑麦克风/音箱语音联调保持暂停；QQ 语音消息按 voice.local.json 发送。");
         try
         {
             while (!lifetime.IsCancellationRequested)
@@ -98,6 +99,7 @@ public static class ChatApplicationHost
                     if (done == nextSettings)
                     {
                         settings = await nextSettings;
+                        currentSettings = settings;
                         await sessionStop.CancelAsync();
                         try { await session; } catch (OperationCanceledException) when (sessionStop.IsCancellationRequested) { }
                         selectedEngine = settings.Engine;
@@ -119,6 +121,7 @@ public static class ChatApplicationHost
                     Console.WriteLine("消息会话未启动或已失败；面板保留，可修正配置后应用。错误类型：" + hostError);
                     if (await Task.WhenAny(nextSettings, panelTask) == panelTask) { await panelTask; break; }
                     settings = await nextSettings;
+                    currentSettings = settings;
                     selectedEngine = settings.Engine;
                     selectedGroup = (settings.ActiveGroupId != 0 ? settings.ActiveGroupId : settings.AllowedGroupIds[0]).ToString(System.Globalization.CultureInfo.InvariantCulture);
                     continue;

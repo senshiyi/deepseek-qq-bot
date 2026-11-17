@@ -14,19 +14,30 @@ internal static class BackgroundRuntimeChecks
         var succeeded = monitor.Snapshot();
         clock.Now = clock.Now.AddMinutes(1);
         monitor.Report(new IOException("private response and signed URL must stay hidden"));
-        Check(monitor.Snapshot() is { State: "failed", LastError: nameof(IOException) } failure && failure.LastSuccessAt == succeeded.LastSuccessAt,
-            "recoverable failure lost last success or exposed exception text");
+        Check(monitor.Snapshot() is { State: "running", LastError: nameof(IOException), LastResult: "failed" } failure &&
+            failure.LastSuccessAt == succeeded.LastSuccessAt &&
+            failure.LastErrorMessage!.Contains("数据读取", StringComparison.Ordinal),
+            "a single failed tick looked like a terminated loop or exposed exception text");
         monitor.Report(null);
         Check(monitor.Snapshot() is { State: "running", LastError: null } recovered && recovered.LastSuccessAt == clock.Now,
             "successful later tick did not recover task health");
 
         await monitor.RunAsync(_ => Task.FromException(new FormatException("private output")), default);
-        Check(monitor.Snapshot() is { State: "failed", LastError: nameof(FormatException) } && logged.Count == 1 &&
-            !logged[0].Contains("private output", StringComparison.Ordinal), "unexpected task failure was silent or leaked its body");
+        Check(monitor.Snapshot() is { State: "failed", LastError: nameof(FormatException), LastErrorCode: "background_loop_failed" } exited &&
+            exited.LastErrorMessage!.Contains("后台循环异常退出", StringComparison.Ordinal) &&
+            logged.Count == 1 && !logged[0].Contains("private output", StringComparison.Ordinal),
+            "a terminated loop was not visible or leaked its body");
+        monitor.Report(null);
+        Check(monitor.Snapshot() is { State: "failed", LastErrorCode: "background_loop_failed" } late && late.LastResult == "failed",
+            "a late callback washed away the terminated loop state");
         var earlyExit = new BackgroundTaskMonitor("health", (_, _) => { });
         await earlyExit.RunAsync(_ => Task.CompletedTask, default);
-        Check(earlyExit.Snapshot() is { State: "failed", LastError: nameof(InvalidOperationException) }, "unexpected clean exit looked healthy");
+        Check(earlyExit.Snapshot() is { State: "failed", LastErrorCode: "background_loop_failed" }, "unexpected clean exit looked healthy");
 
+        var passive = new BackgroundTaskMonitor("voice-input", (_, _) => { });
+        passive.MarkRunning();
+        Check(passive.Snapshot() is { State: "running", LastResult: null, LastSuccessAt: null },
+            "an event driven task looked like it never started or invented a success");
         var cancelled = new BackgroundTaskMonitor("cancelled", (_, _) => throw new Exception("normal cancellation logged as a failure"));
         using (var stop = new CancellationTokenSource())
         {
@@ -58,6 +69,10 @@ internal static class BackgroundRuntimeChecks
             await RejectAsync("bad-shape", (_, _) => Task.FromResult(Response("data: {\"choices\":{}}\n\n")));
             await RejectAsync("timeout", async (_, ct) => { await Task.Delay(Timeout.Infinite, ct); return Response("data: [DONE]\n\n"); },
                 TimeSpan.FromMilliseconds(40));
+            await RejectStatus(HttpStatusCode.Unauthorized, "deepseek_auth");
+            await RejectStatus(HttpStatusCode.PaymentRequired, "deepseek_balance");
+            await RejectStatus(HttpStatusCode.BadRequest, "deepseek_rejected");
+            await RejectStatus(HttpStatusCode.ServiceUnavailable, "deepseek_unavailable");
 
             using var stop = new CancellationTokenSource();
             using var provider = new DeepSeekReply("test-key", Budget("cancel"), new Handler((_, ct) =>
@@ -73,6 +88,22 @@ internal static class BackgroundRuntimeChecks
             catch (OperationCanceledException error) { Check(error.CancellationToken == stop.Token, "caller cancellation lost its token"); }
 
             ApiBudget Budget(string name) => new(Path.Combine(directory, name + ".json"), .3, 10);
+            async Task RejectStatus(HttpStatusCode status, string code)
+            {
+                using var reply = new DeepSeekReply("test-key", Budget("status-" + (int)status),
+                    new Handler((_, _) => Task.FromResult(new HttpResponseMessage(status))));
+                try
+                {
+                    await foreach (var _ in reply.StreamAsync([new("user", "test")], default)) { }
+                    throw new Exception("HTTP " + (int)status + " was accepted");
+                }
+                catch (IOException error)
+                {
+                    var failure = ReplyFailure.From(error);
+                    Check(failure.Code == code && !error.Message.Contains("test-key", StringComparison.Ordinal),
+                        "HTTP " + (int)status + " mapped to " + failure.Code + " or leaked the key");
+                }
+            }
             async Task RejectAsync(string name, Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send, TimeSpan? timeout = null)
             {
                 using var reply = timeout is { } limit
@@ -87,6 +118,7 @@ internal static class BackgroundRuntimeChecks
                 {
                     Check(!error.Message.Contains("private", StringComparison.Ordinal) && error.InnerException is null,
                         name + " error exposed private transport details");
+                    Check(ReplyFailure.From(error).Code == "deepseek_unavailable", name + " failure was not classified for the panel");
                     Check(File.Exists(Path.Combine(directory, name + ".json")), name + " failure refunded its uncertain request");
                 }
             }

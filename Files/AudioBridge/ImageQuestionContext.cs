@@ -4,7 +4,18 @@ using System.Net;
 
 namespace AudioBridge;
 
-public sealed record InlineImage(string MimeType, string DataUrl);
+public sealed record InlineImage(string MimeType, string DataUrl)
+{
+    /// <summary>取出原始字节；不是 data:…;base64, 形式就返回 null，不猜。</summary>
+    public byte[]? TryDecode()
+    {
+        const string marker = ";base64,";
+        var index = DataUrl.IndexOf(marker, StringComparison.Ordinal);
+        if (!DataUrl.StartsWith("data:", StringComparison.Ordinal) || index < 0) return null;
+        try { return Convert.FromBase64String(DataUrl[(index + marker.Length)..]); }
+        catch (FormatException) { return null; }
+    }
+}
 public sealed record ImageQuestionContextResult(string? Clarification, IReadOnlyList<InlineImage> Images);
 
 /// <summary>一轮回复拿到的图片资料：澄清请求、可直接附给能读图模型的图片，或给纯文字模型的转述。</summary>
@@ -153,6 +164,47 @@ public sealed class ImageQuestionContext : IDisposable
                 TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             return Clarify("这张图我读不出来，可能是太大了，压小一点再发一次。");
         }
+    }
+
+    /// <summary>要收藏表情时取最近一张已授权的图：不看"已经看过"的游标，但同样只接受白名单主机。</summary>
+    public async Task<InlineImage?> ResolveNewestAsync(string chatKey, CancellationToken ct, TimeSpan? maximumAge = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(chatKey);
+        ct.ThrowIfCancellationRequested();
+        var age = maximumAge ?? MaximumAge;
+        if (age <= TimeSpan.Zero || age > GroupImageInbox.MaximumEventAge) throw new ArgumentOutOfRangeException(nameof(maximumAge));
+        GroupImageResolution resolution;
+        lock (gate) resolution = inbox.Resolve(chatKey, DateTimeOffset.UtcNow, age);
+        var newest = resolution.Entries.MaxBy(entry => (entry.Timestamp, ParseMessageId(entry.MessageId)));
+        if (newest is null) return null;
+        if (!IsAllowedUrl(newest.Url))
+        {
+            rejectedHost?.Invoke(newest.Url.Host);
+            return null;
+        }
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(timeout);
+        return await DownloadAsync(newest.Url, deadline.Token).ConfigureAwait(false);
+    }
+
+    /// <summary>按消息ID取那条消息的图：给面板补转述用，不消耗"同一张只看一次"的游标。</summary>
+    public async Task<IReadOnlyList<InlineImage>> ResolveMessageAsync(string chatKey, long messageId, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(chatKey);
+        ct.ThrowIfCancellationRequested();
+        GroupImageResolution resolution;
+        lock (gate) resolution = inbox.Resolve(chatKey, DateTimeOffset.UtcNow, MaximumAge);
+        var entries = resolution.Entries.Where(entry => ParseMessageId(entry.MessageId) == messageId).ToArray();
+        if (entries.Length is < 1 or > 2) return [];
+        if (entries.FirstOrDefault(entry => !IsAllowedUrl(entry.Url)) is { } rejected)
+        {
+            rejectedHost?.Invoke(rejected.Url.Host);
+            return [];
+        }
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(timeout);
+        return await Task.WhenAll(entries.Select(entry => Task.Run(() => DownloadAsync(entry.Url, deadline.Token))))
+            .WaitAsync(timeout, ct).ConfigureAwait(false);
     }
 
     private ChatState ChatFor(string chatKey)

@@ -137,7 +137,8 @@ public sealed partial class LocalAdminServer
             {
                 if (request.HttpMethod != "GET") { response.StatusCode = 405; return; }
                 if (path == "/favicon.ico") { response.StatusCode = 204; return; }
-                var file = path switch { "/" or "/index.html" => "index.html", "/app.css" => "app.css", "/app.js" => "app.js", "/companion.js" => "companion.js", _ => null };
+                var file = path switch { "/" or "/index.html" => "index.html", "/app.css" => "app.css", "/app.js" => "app.js",
+                    "/companion.js" => "companion.js", "/contact-persona.js" => "contact-persona.js", _ => null };
                 if (file is null) { response.StatusCode = 404; return; }
                 using var resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("AudioBridge.AdminWeb." + file);
                 if (resource is null) { response.StatusCode = 503; return; }
@@ -156,7 +157,14 @@ public sealed partial class LocalAdminServer
         catch (OperationCanceledException) { await ErrorAsync(response, "面板请求超时，请稍后重试。", 408); }
         catch (JsonException) { await ErrorAsync(response, "配置不是有效的JSON数据。", 400); }
         catch (Exception e) when (e is ArgumentException or InvalidDataException or KeyNotFoundException or InvalidOperationException or FormatException or OverflowException)
-        { await ErrorAsync(response, "输入不符合要求，请检查编号、长度、标签和配置范围。", 400); }
+        {
+            // 人格草稿这几条是我们自己写的中文提示（模型输出从不进异常信息），直接回给管理员看真实原因；
+            // 其他接口仍用统一文案，避免把内部细节拼给客户端。
+            var route = context.Request.Url?.AbsolutePath ?? "";
+            var reason = route.StartsWith("/api/persona-learning/", StringComparison.Ordinal) && e.Message.Length is > 0 and <= 200
+                ? e.Message.Trim() : "输入不符合要求，请检查编号、长度、标签和配置范围。";
+            await ErrorAsync(response, reason, 400);
+        }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or TimeoutException)
         { await ErrorAsync(response, "本地数据暂时无法读写；原数据保留，请检查文件或稍后重试。", 503); }
         catch { await ErrorAsync(response, "操作未完成，请检查本地服务状态。", 500); }
@@ -173,6 +181,13 @@ public sealed partial class LocalAdminServer
                 bool dirty; lock (settingsGate) dirty = restartRequired;
                 result = new { runtime = status(), restartRequired = dirty }; break;
             case "/api/persona": result = profiles.GetPersona(); break;
+            case "/api/contact-personas":
+            {
+                var userId = UserId(request.QueryString["userId"]);
+                RequireLearningContact(userId);
+                result = new { userId, persona = profiles.GetContactPersona(userId), effective = profiles.EffectivePersona(userId) };
+                break;
+            }
             case "/api/schedules": result = Schedules().List(); break;
             case "/api/settings":
                 lock (settingsGate) result = GroupChatSettings.Load(Path.Combine(project, "group-chat.local.json")); break;
@@ -180,7 +195,22 @@ public sealed partial class LocalAdminServer
             case "/api/memory-suggestions":
                 var contact = UserId(request.QueryString["userId"]);
                 result = MemorySuggestions.ForContact(contact, contacts.Recent(contact, 1000), profiles.ListMemories(contact)); break;
-            case "/api/history": result = contacts.Recent(UserId(request.QueryString["userId"])); break;
+            case "/api/history":
+            {
+                // 私聊和群聊分开给：channel 标明来源，原文里的 [群聊] 前缀在这里已经剥掉。
+                var historyUser = UserId(request.QueryString["userId"]);
+                result = contacts.Recent(historyUser, HistoryLimit(request.QueryString["limit"])).Select(message => new
+                {
+                    message.Id, message.UserId, message.MessageId, message.Role,
+                    channel = ContactContextStore.ChannelOf(message),
+                    text = ContactContextStore.BodyOf(message),
+                    // 原文里能直接看到原图：存过就给一个本机图片地址，没存过为 null。
+                    imageUrl = contacts.HasImage(historyUser, message.MessageId)
+                        ? $"/api/history/{historyUser}/images/{message.MessageId}" : null,
+                    message.At
+                });
+                break;
+            }
             case "/api/public-preferences": result = contacts.GetPublicPreference(UserId(request.QueryString["userId"])); break;
             case "/api/companion": result = CompanionList(); break;
             case "/api/companion-settings": result = companion.LoadSettings(); break;
@@ -206,6 +236,12 @@ public sealed partial class LocalAdminServer
                 {
                     var asset = await ReadFavoriteAsync(favoriteId, ct); context.Response.ContentType = asset.MediaType;
                     await context.Response.OutputStream.WriteAsync(asset.Content, ct); return;
+                }
+                if (parts is ["api", "history", var imageUserId, "images", var imageMessageId] &&
+                    contacts.TryReadImage(UserId(imageUserId), imageMessageId, out var imageBytes, out var imageType))
+                {
+                    context.Response.ContentType = imageType;
+                    await context.Response.OutputStream.WriteAsync(imageBytes, ct); return;
                 }
                 if (parts is ["api", "received-images", var receivedId, "image"])
                 {
@@ -251,6 +287,24 @@ public sealed partial class LocalAdminServer
         }
         else if (path == "/api/persona" && method == "PUT")
         { profiles.SavePersona(Deserialize<PersonaSettings>(body)); MarkDirty(); result = profiles.GetPersona(); }
+        else if (path == "/api/contact-personas" && method == "PUT")
+        {
+            var value = Deserialize<ContactPersona>(body);
+            RequireLearningContact(value.UserId);
+            result = new { persona = profiles.SaveContactPersona(value), effective = profiles.EffectivePersona(value.UserId) };
+            MarkDirty();
+        }
+        else if (path.StartsWith("/api/contact-personas/", StringComparison.Ordinal) && method is "PUT" or "DELETE")
+        {
+            var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (parts is not ["api", "contact-personas", var id]) throw new ArgumentException();
+            var userId = UserId(id);
+            RequireLearningContact(userId);
+            result = method == "DELETE"
+                ? new { removed = profiles.DeleteContactPersona(userId) }
+                : new { persona = profiles.SaveContactPersona(Deserialize<ContactPersona>(body)), effective = profiles.EffectivePersona(userId) };
+            MarkDirty();
+        }
         else if (path == "/api/settings" && method == "PUT")
         {
             var value = Deserialize<GroupChatSettings>(body); value.Validate();
@@ -275,6 +329,12 @@ public sealed partial class LocalAdminServer
             result = profiles.AddMemory(body.GetProperty("userId").GetInt64(), body.GetProperty("text").GetString()!);
         else if (path == "/api/companion-settings" && method == "PUT")
         { await SaveCompanionSettingsAsync(context, body, ct); return; }
+        else if (method == "PUT" && path.StartsWith("/api/companion/", StringComparison.Ordinal) &&
+            path.EndsWith("/meters", StringComparison.Ordinal))
+        {
+            var metersUser = path["/api/companion/".Length..^"/meters".Length].Trim('/');
+            await SaveCompanionMetersAsync(context, UserId(metersUser), body, ct); return;
+        }
         else if (path == "/api/public-preferences" && method == "PUT")
         { var preference = Deserialize<PublicContactPreference>(body); contacts.SavePublicPreference(preference); result = preference; }
         else if (path == "/api/memes" && method == "POST")
@@ -340,6 +400,14 @@ public sealed partial class LocalAdminServer
     }
 
     private void MarkDirty() { lock (settingsGate) restartRequired = true; }
+    /// <summary>面板一次最多取多少条原文；不传默认 400，越界直接拒绝而不是悄悄截断。</summary>
+    private static int HistoryLimit(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return 400;
+        return int.TryParse(value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var limit) &&
+            limit is >= 1 and <= 1000 ? limit : throw new ArgumentException("原文条数必须在 1～1000 条之间。");
+    }
+
     private ScheduledMessageTask SaveSchedule(ScheduledMessageDraft draft, string? id = null, long? revision = null)
     {
         lock (settingsGate)

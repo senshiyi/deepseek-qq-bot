@@ -27,6 +27,7 @@ public static class PersonaLearningChecks
             ("pre-cancellation never creates a provider", PreCancelled),
             ("cancellation rejects late chunks and late completion and releases the provider", CancelledLateResults),
             ("snapshot hash detects every field edited before human confirmation", OptimisticHash),
+            ("an unparseable draft is retried once before giving up", Retry),
             ("invalid arguments do not reach a model", InvalidArguments)
         };
         foreach (var check in checks) { await check.Run(); Console.WriteLine("PASS persona learning: " + check.Name); }
@@ -195,6 +196,19 @@ public static class PersonaLearningChecks
         await Throws<ArgumentNullException>(() => PersonaLearning.GenerateAsync(Original, 20, null!, Factory, default, Now));
         await Throws<ArgumentNullException>(() => PersonaLearning.GenerateAsync(Original, 20, [], null!, default, Now));
         Check(calls == 0, "invalid arguments created a provider");
+    }
+
+    private static async Task Retry()
+    {
+        var outputs = new Queue<string>(["not json", Proposal]);
+        var calls = 0;
+        var draft = await PersonaLearning.GenerateAsync(Original, 20, [Message(20, "source", Now)],
+            _ => { calls++; return new FixedReply(outputs.Dequeue()); }, default, Now);
+        Check(calls == 2 && draft.ProposedPersona.Name == "小鱼", "an unparseable draft was not retried once");
+        var always = 0;
+        await Throws<InvalidDataException>(() => PersonaLearning.GenerateAsync(Original, 20, [Message(20, "source", Now)],
+            _ => { always++; return new FixedReply("not json"); }, default, Now));
+        Check(always == 2, "the retry budget was wrong");
     }
 
     private static Task<PersonaLearningDraft> Generate(IReadOnlyList<StoredPrivateMessage> messages, IStreamingReply reply) =>

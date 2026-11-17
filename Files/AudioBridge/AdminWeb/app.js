@@ -20,9 +20,9 @@
     dirty: { persona: false, settings: false, public: false, companion: false },
     loading: { persona: false, settings: false, memes: false, companion: false },
     saving: { persona: false, settings: false, memory: false, public: false, history: false, companion: false },
-    companion: null, companionRequest: 0,
+    companion: null, companionRequest: 0, companionContact: "all", companionLevel: "all",
     userId: null, memoryTab: "notes", memoryGeneration: 0, editingId: null,
-    memories: [], history: [], publicLoaded: false, memoriesLoaded: false, historyLoaded: false, historyRequest: 0, memoryRequest: 0,
+    memories: [], history: [], historyFilter: "all", historyUrls: new Set(), publicLoaded: false, memoriesLoaded: false, historyLoaded: false, historyRequest: 0, memoryRequest: 0,
     memeUrls: new Set(), memeGeneration: 0, memesLoaded: false,
     memeBatchRows: [], memeBatchUrls: new Set(), memeBatchGeneration: 0, memeBatchBusy: false,
     favoriteUrls: new Set(), favoriteGeneration: 0, favoritesLoading: false,
@@ -32,6 +32,7 @@
   };
 
   const companionPage = window.createCompanionPage({ state, $, api, message, markDirty, confirmDiscard, element, number, date });
+  const contactPersonaPage = window.createContactPersonaPage?.({ $, api, message });
 
   function text(id, value) { $(id).textContent = value == null ? "—" : String(value); }
   function message(id, value = "", type = "") {
@@ -94,6 +95,7 @@
     state.editingId = null;
     state.memories = [];
     state.history = [];
+    state.historyFilter = "all";
     state.publicLoaded = state.memoriesLoaded = state.historyLoaded = false;
     state.memoryRequest++;
     state.historyRequest++;
@@ -223,8 +225,9 @@
     text("runtime-key", runtime?.keyEnvironment || "—");
     text("persona-learning-engine", `草稿使用当前实际运行：${engineName(runtime?.engine)}${runtime?.model ? ` · ${runtime.model}` : " · 模型信息未提供"}`);
     text("settings-running-engine", `当前运行实际引擎：${engineName(runtime?.engine)}${runtime?.model ? ` · ${runtime.model}` : ""}`);
-    text("runtime-error", runtime?.lastError || "");
-    $("runtime-error").hidden = !runtime?.lastError;
+    const runtimeError = runtime?.lastErrorMessage || runtime?.lastError;
+    text("runtime-error", runtimeError ? `最近一次回复失败：${runtimeError}${runtime?.lastErrorAt ? ` · 发生于 ${date(runtime.lastErrorAt)}` : ""}` : "");
+    $("runtime-error").hidden = !runtimeError;
     $("restart-notice").hidden = !payload?.restartRequired;
     $("connection-status").className = "connection";
     text("connection-text", "本地服务已连接");
@@ -262,16 +265,24 @@
   }
   function renderBackgroundTasks(values) {
     const items = Array.isArray(values) ? values : [];
-    const names = { companion: "心脑（日记、心情与主动唤醒）", "onebot-health": "QQ 健康检查", "message-listener": "消息监听", "message-worker": "消息处理" };
-    const states = { starting: "正在启动", running: "运行中", failed: "失败", stopped: "已停止" };
+    const names = { companion: "心脑（日记、心情与主动唤醒）", "onebot-health": "QQ 健康检查", "message-listener": "消息监听", "message-worker": "消息处理", "voice-input": "语音输入", "memory-learner": "长期记忆整理" };
+    const states = { starting: "正在启动", running: "运行中", failed: "已终止（异常）", stopped: "已停止" };
+    const results = { succeeded: "成功", failed: "失败" };
     for (const id of ["background-tasks", "companion-background-tasks"]) {
       const container = $(id); container.replaceChildren();
       if (!items.length) { container.append(element("p", "当前运行未提供后台任务状态。", "muted")); continue; }
       for (const item of items) {
+        const hasResult = Object.prototype.hasOwnProperty.call(item, "lastResult");
+        const lifecycle = item.state === "failed" && !hasResult ? "失败（旧版状态，运行情况待核对）" : states[item.state] || "状态未知";
         const row = element("p");
         row.append(element("strong", `${names[item.name] || item.name}：`),
-          element("span", states[item.state] || "状态未知", `pill${item.state === "failed" ? " warning" : " neutral"}`));
-        row.append(element("span", ` · 最近成功：${item.lastSuccessAt ? date(item.lastSuccessAt) : "尚无记录"}${item.lastError ? ` · 最近错误：${item.lastError}` : ""}`, "muted"));
+          element("span", lifecycle, `pill${item.state === "failed" ? " warning" : " neutral"}`));
+        let detail = hasResult ? ` · 最近处理：${results[item.lastResult] || "尚无记录"}${item.lastResultAt ? ` · 最近处理时间：${date(item.lastResultAt)}` : ""}` : "";
+        detail += ` · 最近成功：${item.lastSuccessAt ? date(item.lastSuccessAt) : "尚无记录"}`;
+        if (hasResult && (item.lastResult === "failed" || item.state === "failed"))
+          detail += ` · 原因：${item.lastErrorMessage || item.lastError || "当前服务未提供失败原因，请查看本机诊断记录。"}`;
+        else if (!hasResult && item.lastError) detail += ` · 最近错误类型：${item.lastError}`;
+        row.append(element("span", detail, "muted"));
         container.append(row);
       }
     }
@@ -572,7 +583,8 @@
     "settings-private-interval": "privateIntervalSeconds", "settings-private-limit": "privatePerHour",
     "settings-mention-interval": "mentionIntervalSeconds", "settings-mention-limit": "mentionPerHour",
     "settings-active-interval": "activeIntervalSeconds", "settings-active-limit": "activePerHour",
-    "settings-active-every": "activeMessageEvery"
+    "settings-active-every": "activeMessageEvery",
+    "settings-budget": "apiBudgetYuan", "settings-calls": "maxApiCalls"
   };
   async function loadSettings(force = false) {
     if (state.loading.settings || state.saving.settings || (state.settings && !force)) return;
@@ -655,6 +667,11 @@
       value.botNames = splitValues($("settings-names").value);
       if (!value.botNames.length || value.botNames.length > 4 || value.botNames.some(name => name.length > 16)) throw new Error("机器人称呼需 1–4 个，每个最多 16 字。");
       if (new Set(value.botNames).size !== value.botNames.length) throw new Error("机器人称呼不能重复。");
+      value.apiBudgetYuan = Math.round(value.apiBudgetYuan * 100) / 100;
+      if (!Number.isFinite(value.apiBudgetYuan) || value.apiBudgetYuan < 0.01 || value.apiBudgetYuan > 100)
+        throw new Error("DeepSeek 金额上限需为 0.01–100 元。");
+      if (!Number.isInteger(value.maxApiCalls) || value.maxApiCalls < 1 || value.maxApiCalls > 1000)
+        throw new Error("DeepSeek 调用次数上限需为 1–1000 的整数。");
     } catch (error) { message("settings-message", error.message, "error"); return; }
     state.saving.settings = true;
     $("settings-fields").disabled = true;
@@ -781,6 +798,7 @@
       const footer = element("div", null, "memory-item-footer");
       const stamp = element("time", `更新于 ${date(memory.updatedAt || memory.createdAt)}`);
       if (memory.updatedAt || memory.createdAt) stamp.dateTime = memory.updatedAt || memory.createdAt;
+      if (memory.origin === "auto") stamp.append(" ", element("span", "自己记的", "pill neutral"));
       const buttons = element("div", null, "button-row");
       const edit = element("button", "编辑", "button");
       edit.type = "button";
@@ -806,7 +824,7 @@
     $("memory-empty").hidden = state.memories.length > 0;
     if (!state.memories.length) {
       $("memory-empty").querySelector("h3").textContent = "还没有长期笔记";
-      $("memory-empty").querySelector("p").textContent = "在下方手动保存笔记；开启群聊共享后也可用于该成员的群聊回复。";
+      $("memory-empty").querySelector("p").textContent = "她会在私聊后自己整理长期笔记（每半小时看一眼新私聊）；你也可以在下方补充。开启群聊共享后同样可用于该成员的群聊回复。";
     }
   }
   async function loadMemorySuggestions(userId, generation, request) {
@@ -882,22 +900,13 @@
     const request = ++state.historyRequest;
     $("history-refresh").disabled = true;
     $("history-clear").disabled = true;
-    message("history-message", "正在读取近 7 天私聊原文…");
+    message("history-message", "正在读取近 7 天原文…");
     try {
-      const values = await api(`/api/history?userId=${userId}`);
+      const values = await api(`/api/history?userId=${userId}&limit=400`);
       if (generation !== state.memoryGeneration || request !== state.historyRequest) return;
       state.history = Array.isArray(values) ? values : [];
       state.historyLoaded = true;
-      const container = $("history-list");
-      container.replaceChildren();
-      for (const entry of state.history) {
-        const item = element("article", null, `history-entry${entry.role === "assistant" ? " assistant" : ""}`);
-        const header = element("header");
-        header.append(element("strong", entry.role === "assistant" ? "机器人" : `QQ ${userId}`), element("time", date(entry.at)));
-        item.append(header, element("p", entry.text));
-        container.append(item);
-      }
-      message("history-message", state.history.length ? `QQ ${userId} · 最近 ${state.history.length} 条私聊原文` : `QQ ${userId} 在保留期内没有私聊原文。`);
+      renderHistory();
     } catch (error) { if (generation === state.memoryGeneration && request === state.historyRequest) message("history-message", `${error.message} 点击“刷新”重试。需要删除损坏原文时可选择“清除此人原文”。`, "error"); }
     finally {
       if (generation === state.memoryGeneration && request === state.historyRequest) {
@@ -906,14 +915,79 @@
       }
     }
   }
+  // 点击筛选：全部 / 私聊 / 群聊，只重画列表，不重新请求。
+  function renderHistory() {
+    const userId = state.userId;
+    const filter = state.historyFilter || "all";
+    const isGroup = entry => entry.channel === "group";
+    const privateEntries = state.history.filter(entry => !isGroup(entry));
+    const groupEntries = state.history.filter(isGroup);
+    const filters = $("history-filters");
+    filters.hidden = state.history.length === 0;
+    for (const button of filters.querySelectorAll("[data-history-filter]")) {
+      const key = button.getAttribute("data-history-filter");
+      const count = key === "all" ? state.history.length : key === "group" ? groupEntries.length : privateEntries.length;
+      button.textContent = `${key === "all" ? "全部" : key === "group" ? "群聊" : "私聊"} ${count}`;
+      const active = key === filter;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    const container = $("history-list");
+    container.replaceChildren();
+    for (const url of state.historyUrls) URL.revokeObjectURL(url);
+    state.historyUrls.clear();
+    const entries = filter === "group" ? groupEntries : filter === "private" ? privateEntries : state.history;
+    if (entries.length === 0) {
+      container.append(element("p", state.history.length === 0 ? "保留期内没有对话原文。" : "这个来源下没有记录。", "muted"));
+    }
+    for (const entry of entries) {
+      const item = element("article", null, `history-entry${entry.role === "assistant" ? " assistant" : ""}`);
+      const header = element("header");
+      const who = entry.role === "assistant" ? "机器人" : `QQ ${userId}`;
+      const label = isGroup(entry) && entry.role !== "assistant" ? `${who}（群聊）` : who;
+      header.append(element("strong", label), element("time", date(entry.at)));
+      item.append(header, element("p", entry.text));
+      if (entry.imageUrl) item.append(historyImage(entry.imageUrl));
+      container.append(item);
+    }
+    message("history-message", state.history.length
+      ? `QQ ${userId} · 共 ${state.history.length} 条（私聊 ${privateEntries.length} / 群聊 ${groupEntries.length}）`
+      : `QQ ${userId} 在保留期内没有对话原文。`);
+  }
+
+  // 原文里的图：连登录令牌取回字节再显示，地址只接受本机同源的历史图片路径。
+  function historyImage(path) {
+    const wrap = element("div", "正在载入图片…", "history-image");
+    const parsed = new URL(path, window.location.href);
+    const parts = parsed.pathname.split("/");
+    const valid = parsed.origin === window.location.origin && !parsed.search && !parsed.hash &&
+      parts.length === 6 && parts[1] === "api" && parts[2] === "history" && parts[3] !== "" &&
+      parts[4] === "images" && parts[5] !== "";
+    if (!valid) {
+      wrap.textContent = "图片地址无效。";
+      return wrap;
+    }
+    api(parsed.pathname, { blob: true, timeout: 25000 }).then(blob => {
+      if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(blob.type.toLowerCase()) || !blob.size) throw new Error("图片格式不支持");
+      const url = URL.createObjectURL(blob);
+      state.historyUrls.add(url);
+      const img = element("img");
+      img.alt = "对话里收到的图片";
+      img.addEventListener("error", () => { wrap.replaceChildren(element("p", "图片无法显示。", "muted")); }, { once: true });
+      img.src = url;
+      wrap.replaceChildren(img);
+    }).catch(error => { wrap.replaceChildren(element("p", "图片没能显示：" + error.message, "muted")); });
+    return wrap;
+  }
+
   async function clearHistory() {
-    if (!state.userId || state.saving.history || !window.confirm(`确定清除 QQ ${state.userId} 的全部已保存私聊原文？无法撤销，长期笔记将保留。`)) return;
+    if (!state.userId || state.saving.history || !window.confirm(`确定清除 QQ ${state.userId} 的全部已保存原文（私聊和群聊）？无法撤销，长期笔记将保留。`)) return;
     const session = state.session;
     state.historyRequest++;
     state.saving.history = true;
     $("history-clear").disabled = true;
     $("history-refresh").disabled = true;
-    message("history-message", "正在清除该联系人的私聊原文…");
+    message("history-message", "正在清除该联系人的对话原文…");
     try {
       await api(`/api/history?userId=${state.userId}`, { method: "DELETE" });
       if (session !== state.session) return;
@@ -923,7 +997,7 @@
       state.memoryRequest++;
       $("memory-suggestions-list").replaceChildren();
       message("memory-suggestions-message", "私聊原文已清除；重新读取长期笔记时将同步更新待确认请求。");
-      message("history-message", "该联系人的已保存私聊原文已清除，长期笔记已保留。", "success");
+      message("history-message", "该联系人的已保存对话原文已清除，长期笔记已保留。", "success");
     } catch (error) { if (session === state.session) message("history-message", error.message, "error"); }
     finally { if (session === state.session) { state.saving.history = false; $("history-refresh").disabled = false; $("history-clear").disabled = !state.userId; } }
   }
@@ -1030,6 +1104,9 @@
         const preview = element("div", null, "meme-preview");
         preview.append(element("p", "正在载入预览…"));
         card.append(preview, element("h3", meme.id, "meme-id"));
+        if (typeof meme.faceId === "number") card.append(element("p", "QQ 原生表情（普通小表情）", "muted"));
+        else if (String(meme.id).startsWith("self-")) card.append(element("p", "大肥鱼自己收藏的图片表情包", "muted"));
+        else card.append(element("p", "图片表情包", "muted"));
         const input = element("input");
         input.value = Array.isArray(meme.tags) ? meme.tags.join("，") : "";
         input.dataset.saved = input.value;
@@ -1692,7 +1769,11 @@
     text("breadcrumb-title", titles[view][0]);
     text("page-title", titles[view][1]);
     text("page-description", titles[view][2]);
-    if (view === "persona") { await loadPersona(); if (state.view === "persona" && state.token) await loadPersonaSources(); }
+    if (view === "persona") {
+      await loadPersona();
+      if (state.view === "persona" && state.token) await loadPersonaSources();
+      if (state.view === "persona" && state.token) await contactPersonaPage?.bringUp();
+    }
     if (view === "settings" || view === "memories") await loadSettings();
     if (view === "memes") await loadMemes();
     if (view === "schedules") { updateScheduleType(); await loadSchedules(); }
@@ -1776,6 +1857,12 @@
     });
   }
   $("history-refresh").addEventListener("click", () => loadHistory(true));
+  for (const button of $("history-filters").querySelectorAll("[data-history-filter]")) {
+    button.addEventListener("click", () => {
+      state.historyFilter = button.getAttribute("data-history-filter") || "all";
+      renderHistory();
+    });
+  }
   $("history-clear").addEventListener("click", clearHistory);
   $("public-refresh").addEventListener("click", () => loadPublic(true));
   $("memory-public-pane").addEventListener("input", () => { markDirty("public"); message("public-message", "公开偏好尚未保存。"); });

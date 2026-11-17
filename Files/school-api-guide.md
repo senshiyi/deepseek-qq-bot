@@ -32,7 +32,7 @@ SCHOOL_API_KEY=在本机填写，不发送到聊天或群里
 }
 ```
 
-模型ID、输入/输出点价必须明确，未知价格不会按零处理。`maxPoints` 和 `maxCalls` 显式设为 `null` 表示分别取消累计点数或次数上限。省略 `maxCalls` 时默认仍为10次，省略 `maxPoints` 时该项为null；建议两项都明确填写，避免误解。原有正数上限配置继续支持，达到任一已设置的上限后停止新调用；不要删除账本。学校只允许已核实的HTTPS网关，禁止重定向与Cookie；沿用系统已有网络代理，不修改系统网络设置。
+模型ID、输入/输出点价必须明确，未知价格不会按零处理。`maxPoints` 和 `maxCalls` 显式设为 `null` 表示分别取消累计点数或次数上限。省略 `maxCalls` 时默认仍为10次，省略 `maxPoints` 时该项为null；建议两项都明确填写，避免误解。原有正数上限配置继续支持，达到任一已设置的上限后停止新调用；不要删除账本。学校只允许已核实的HTTPS网关，禁止重定向与Cookie；**学校入口直连、不走系统代理**——Clash 这类代理会把 10.x 校内网关当外网转给节点，TLS 握手直接失败。若本机 DNS 会过滤网关的内网 A 记录（smartdns 很常见，表现是 `nslookup myai.bupt.edu.cn` 返回空、但 `nslookup myai.bupt.edu.cn 202.112.10.1` 有 `10.3.19.2`），在同一文件加 `"resolveIp": "10.3.19.2"`：连接改用这个 IP，SNI 和证书仍按 `myai.bupt.edu.cn` 校验。域名或 IP 变动时删掉这一项即可。
 
 `group-chat.local.json` 的 `engine` 为 `school` 时，双击 `start-chat.cmd` 和未显式指定engine的真实chat命令都会选择学校入口。显式 `--engine deepseek` 可使用保留的DeepSeek直连；失败时不会自动转用其他供应商或重复提交。
 

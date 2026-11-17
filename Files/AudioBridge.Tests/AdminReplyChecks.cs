@@ -24,10 +24,12 @@ public static class AdminReplyChecks
             ("explicit known meme requests bypass generation while negation and global disable do not", ExplicitMemeRequests),
             ("reference delegate receives the current trigger and stays inside each user message", ReferenceScope),
             ("ambient opportunities and name mentions have distinct model hints", TriggerScope),
+            ("each prompt line names its speaker so group members cannot be confused", SpeakerLabels),
             ("school request token bound matches its points reservation", SchoolTokens),
             ("DeepSeek request token bound matches its currency reservation", DeepSeekTokens),
             ("invalid output token bounds are rejected before transport or ledger mutation", InvalidTokens),
-            ("image context attaches the reply, feeds the caption and hands failures to the model", ImageContextFlow)
+            ("image context attaches the reply, feeds the caption and hands failures to the model", ImageContextFlow),
+            ("a queued private message after her own reply is told not to repeat it", RepeatedPrivateReply)
         };
         foreach (var check in checks) { await check.Run(); Console.WriteLine("PASS admin replies: " + check.Name); }
         return checks.Length;
@@ -66,6 +68,30 @@ public static class AdminReplyChecks
             if (trigger == GroupChatTrigger.Private)
                 Check(prompt.Contains("一对一私聊", StringComparison.Ordinal) && !prompt.Contains("普通群聊主动参与", StringComparison.Ordinal), "private message routed into ambient prompt");
         }
+    }
+
+    private static async Task SpeakerLabels()
+    {
+        var source = new CaptureReply();
+        var brain = new GroupChatBrain(_ => source, [], 99);
+        var named = Message(20, 1, "我先说", false) with { DisplayName = "小明" };
+        var own = Message(99, 0, "我回一句", false) with { DisplayName = "随便" };
+        var plain = Message(21, 2, "第二个人的问题", false);
+        await brain.GenerateAsync([named, own, plain], default, plain, GroupChatTrigger.Mention);
+        var prompt = source.History.Single().Content;
+        Check(prompt.Contains("小明(20): 我先说", StringComparison.Ordinal), "named member lost its speaker label");
+        Check(prompt.Contains("机器人（本账号）: 我回一句", StringComparison.Ordinal), "own reply was labelled as another member");
+        Check(prompt.Contains("成员21: 第二个人的问题", StringComparison.Ordinal), "unnamed member lost its numeric label");
+        Check(prompt.Contains("（来自成员21）", StringComparison.Ordinal), "trigger line did not name its speaker");
+        var plainPrompt = GroupChatBrain.SystemPrompt([], GroupChatMode.Mention);
+        Check(plainPrompt.Contains("发言人标识", StringComparison.Ordinal), "speaker label rule missing from the system prompt");
+        Check(plainPrompt.Contains("绝不声称已经发出", StringComparison.Ordinal), "the prompt still lets the model claim a space post it never made");
+        var privateSource = new CaptureReply();
+        var privateBrain = new GroupChatBrain(_ => privateSource, [], 99);
+        var direct = Message(20, 3, "私聊一句", true);
+        await privateBrain.GenerateAsync([direct], default, direct, GroupChatTrigger.Private);
+        Check(privateSource.History.Single().Content.Contains("对方: 私聊一句", StringComparison.Ordinal),
+            "private chat leak its contact's group nickname into the address");
     }
 
     private static Task PrivatePersonaIsolation()
@@ -179,7 +205,7 @@ public static class AdminReplyChecks
     {
         IReadOnlyList<MemeEntry> catalog = [new("qq_face_0", "", ["微笑"], 0)];
         var snapshots = new List<IReadOnlyList<MemeEntry>>();
-        var brain = new GroupChatBrain(() => catalog, (_, current) =>
+        var brain = new GroupChatBrain(() => catalog, (_, current, _) =>
         {
             snapshots.Add(current);
             var match = current.SingleOrDefault(entry => entry.Tags.Contains("不满"));
@@ -203,7 +229,7 @@ public static class AdminReplyChecks
     {
         var calls = 0;
         var catalog = new MemeEntry[] { new("miku_02", "miku_02.jpg", ["不满"]), new("miku_01", "miku_01.png", ["神圣"]) };
-        GroupChatBrain Brain(int probability) => new(() => catalog, (_, _) => { calls++; return new FixedReply(Decision); },
+        GroupChatBrain Brain(int probability) => new(() => catalog, (_, _, _) => { calls++; return new FixedReply(Decision); },
             persona: new PersonaSettings { MemeProbabilityPercent = probability });
         foreach (var text in new[] { "给我发miku_02表情包", "请发 miku_02", "再发一张miku_02表情包" })
         {
@@ -324,6 +350,34 @@ public static class AdminReplyChecks
         }
         Check(!File.Exists(folder.PathOf("deepseek.json")) && !File.Exists(folder.PathOf("school.json")), "invalid token limit mutated a budget ledger");
         return Task.CompletedTask;
+    }
+
+    private static async Task RepeatedPrivateReply()
+    {
+        var source = new CaptureReply();
+        var brain = new GroupChatBrain(_ => source, [], 99);
+        var queued = Message(20, 7, "我知道惹", true);
+        var own = Message(99, 0, "明白就去吃 别磨蹭", true) with { At = queued.At.AddSeconds(30) };
+        await brain.GenerateAsync([queued, own], default, queued, GroupChatTrigger.Private);
+        var prompt = source.History.Single().Content;
+        Check(prompt.Contains("【这条你已经回过一次了】", StringComparison.Ordinal) &&
+              prompt.Contains("明白就去吃", StringComparison.Ordinal) && prompt.Contains("send=false", StringComparison.Ordinal),
+            "a queued private message was not told that she already replied");
+
+        var later = new CaptureReply();
+        var second = new GroupChatBrain(_ => later, [], 99);
+        var newer = Message(20, 8, "帮我看下天气", true) with { At = own.At.AddSeconds(10) };
+        await second.GenerateAsync([queued, own, newer], default, newer, GroupChatTrigger.Private);
+        Check(!later.History.Single().Content.Contains("【这条你已经回过一次了】", StringComparison.Ordinal),
+            "a fresh private message was wrongly flagged as already answered");
+
+        var groupSource = new CaptureReply();
+        var groupBrain = new GroupChatBrain(_ => groupSource, [], 99);
+        var groupTrigger = Message(20, 9, "在吗", false) with { At = own.At.AddSeconds(-60) };
+        var groupOwn = Message(99, 0, "我在", false) with { At = groupTrigger.At.AddSeconds(10) };
+        await groupBrain.GenerateAsync([groupTrigger, groupOwn], default, groupTrigger, GroupChatTrigger.Mention);
+        Check(!groupSource.History.Single().Content.Contains("【这条你已经回过一次了】", StringComparison.Ordinal),
+            "group replies were handed the private repeat guard");
     }
 
     private static async Task ImageContextFlow()

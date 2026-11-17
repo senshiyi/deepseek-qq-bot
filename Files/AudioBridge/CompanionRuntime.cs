@@ -12,6 +12,8 @@ public sealed class CompanionRuntime
     private static readonly TimeSpan PurgeInterval = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromMinutes(10);
     private const int WakeContextCharacters = 1200;
+    /// <summary>空间评论轮询间隔：空间页面能读，但别太密，十分钟一次足够。</summary>
+    private static readonly TimeSpan CommentPoll = TimeSpan.FromMinutes(10);
 
     private readonly CompanionStore store;
     private readonly ContactContextStore contacts;
@@ -24,14 +26,27 @@ public sealed class CompanionRuntime
     private readonly TimeProvider timeProvider;
     private readonly Action<string, object> log;
     private readonly Action<Exception?>? tickCompleted;
+    private readonly Func<string, CancellationToken, Task>? publishQzone;
+    private readonly QzoneStore? qzone;
+    private readonly Func<CancellationToken, Task<IReadOnlyList<QzoneComment>>>? qzoneComments;
+    private readonly Func<long, PersonaSettings>? personaFor;
+    private DateTimeOffset qzoneRetryAfter = DateTimeOffset.MinValue;
+    private DateTimeOffset nextCommentPoll = DateTimeOffset.MinValue;
     private readonly Dictionary<long, DateTimeOffset> retryAfter = [];
     private DateTimeOffset nextPurge = DateTimeOffset.MinValue;
 
     public CompanionRuntime(CompanionStore store, ContactContextStore contacts, PersonaSettings persona,
         Func<string, IStreamingReply> replyFactory, Func<GroupChatStatus> status,
         Func<long, string, CancellationToken, Task> deliver, IReadOnlyList<long> allowedUsers, bool live,
-        Action<string, object> log, TimeProvider? timeProvider = null, Action<Exception?>? tickCompleted = null)
+        Action<string, object> log, TimeProvider? timeProvider = null, Action<Exception?>? tickCompleted = null,
+        Func<string, CancellationToken, Task>? publishQzone = null, QzoneStore? qzone = null,
+        Func<CancellationToken, Task<IReadOnlyList<QzoneComment>>>? qzoneComments = null,
+        Func<long, PersonaSettings>? personaFor = null)
     {
+        this.personaFor = personaFor;
+        this.publishQzone = publishQzone;
+        this.qzone = qzone;
+        this.qzoneComments = qzoneComments;
         this.store = store; this.contacts = contacts; this.persona = persona; this.replyFactory = replyFactory;
         this.status = status; this.deliver = deliver; this.allowedUsers = allowedUsers; this.live = live;
         this.log = log; this.timeProvider = timeProvider ?? TimeProvider.System;
@@ -79,6 +94,21 @@ public sealed class CompanionRuntime
             { failure = error; log("companion_forget_failed", new { type = error.GetType().Name }); }
             nextPurge = now + PurgeInterval;
         }
+        try { await PublishQzoneAsync(settings, now, ct).ConfigureAwait(false); }
+        catch (Exception error) when (Recoverable(error, ct))
+        {
+            // 空间失败不重试：一小时内不再尝试，避免每 30 秒重复调用模型或打日志。
+            qzoneRetryAfter = now.AddHours(1);
+            failure = error;
+            log("qzone_publish_failed", new { type = error.GetType().Name, reason = error.Message });
+        }
+        try { await ReplyToCommentsAsync(settings, now, ct).ConfigureAwait(false); }
+        catch (Exception error) when (Recoverable(error, ct))
+        {
+            nextCommentPoll = now + CommentPoll;
+            failure = error;
+            log("qzone_comments_failed", new { type = error.GetType().Name, reason = error.Message });
+        }
         foreach (var user in allowedUsers.Distinct())
         {
             ct.ThrowIfCancellationRequested();
@@ -93,6 +123,15 @@ public sealed class CompanionRuntime
         ct.ThrowIfCancellationRequested();
         // 退避期间的空转不证明失败操作已恢复，保留面板上的失败状态。
         if (failure is not null || !retryDeferred) tickCompleted?.Invoke(failure);
+    }
+
+    /// <summary>该联系人实际使用的人格；读取失败时退回全局人格，不中断这一轮。</summary>
+    private PersonaSettings PersonaFor(long userId)
+    {
+        if (personaFor is null) return persona;
+        try { return personaFor(userId); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException or TimeoutException)
+        { log("persona_unavailable", new { userId, type = error.GetType().Name }); return persona; }
     }
 
     private static bool Recoverable(Exception error, CancellationToken ct) =>
@@ -111,7 +150,7 @@ public sealed class CompanionRuntime
         var history = Unaudited(contacts.Recent(user, 1000), snapshot, now);
         if (history.Length == 0) { store.MarkAudited(user, now); return; }
         var batch = CompanionJournal.BuildBatch(history);
-        var draft = await CompanionJournal.GenerateAsync(persona, snapshot.Mood, batch, replyFactory, ct).ConfigureAwait(false);
+        var draft = await CompanionJournal.GenerateAsync(PersonaFor(user), snapshot.Mood, batch, replyFactory, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         var completed = batch.Count == history.Length;
         var last = batch[^1];
@@ -133,6 +172,80 @@ public sealed class CompanionRuntime
             // 游标已被七天/1000条保留策略清出时，同一时间的剩余消息也必须继续整理。
             : history.Where(message => message.At >= cursor.At).ToArray();
     }
+
+    /// <summary>
+    /// 读自己空间页面上的新评论，用私聊回应：空间回复接口对非浏览器会话不可用，
+    /// 所以这里只在私聊里回；每条评论只处理一次，第一次运行把历史评论全部登记不回复。
+    /// </summary>
+    private async Task ReplyToCommentsAsync(CompanionSettings settings, DateTimeOffset now, CancellationToken ct)
+    {
+        if (qzoneComments is null || qzone is null || !settings.Qzone || now < nextCommentPoll) return;
+        nextCommentPoll = now + CommentPoll;
+        var comments = await qzoneComments(ct).ConfigureAwait(false);
+        var state = qzone.Load();
+        if (!state.Seeded)
+        {
+            if (comments.Count > 0) qzone.MarkHandled(comments.Select(comment => comment.Id));
+            qzone.MarkSeeded();
+            log("qzone_comments_seeded", new { count = comments.Count });
+            return;
+        }
+        var handled = state.HandledComments.ToHashSet(StringComparer.Ordinal);
+        var fresh = comments.Where(comment => allowedUsers.Contains(comment.AuthorUin) && !handled.Contains(comment.Id)).Take(3).ToArray();
+        if (fresh.Length == 0) return;
+        var answered = new List<string>(fresh.Length);
+        foreach (var comment in fresh)
+        {
+            ct.ThrowIfCancellationRequested();
+            var reply = await GenerateAsync(BuildCommentPrompt(comment), ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            var text = reply.Send ? reply.Text.Trim() : "";
+            if (text.Length == 0)
+            {
+                answered.Add(comment.Id);
+                log("qzone_comment_skipped", new { commentId = comment.Id });
+                continue;
+            }
+            await deliver(comment.AuthorUin, text, ct).ConfigureAwait(false);
+            answered.Add(comment.Id);
+            log("qzone_comment_replied", new { commentId = comment.Id, characters = text.Length });
+        }
+        if (answered.Count > 0) qzone.MarkHandled(answered);
+    }
+
+    private string BuildCommentPrompt(QzoneComment comment)
+    {
+        var current = PersonaFor(comment.AuthorUin);
+        return "你叫「" + current.Name + "」，性格是：" + current.Personality + "。表达方式是：" + current.SpeakingStyle + "。" +
+        "你在 QQ 空间发过一条说说，现在「" + current.UserAddress + "」在那条说说下面评论了：\"" +
+        comment.Text.Replace("\"", "'", StringComparison.Ordinal) + "\"。" +
+        "你要在私聊里回他一句，让他知道你已经看到这条评论：1～2句、不超过60字、口语，可以顺带提一下评论里的意思。" +
+        "不要复述聊天记录，不要提系统、接口、定时、模型、空间这些词，不要解释你为什么在私聊里回。" +
+        "只回复严格JSON对象{\"send\":true或false,\"text\":\"正文\"}，text为字符串；不要输出其他字段、Markdown或JSON之外的文字。";
+    }
+
+    /// <summary>一天最多一条说说；模型选择不发也记为已尝试，避免整天反复调用模型。</summary>
+    private async Task PublishQzoneAsync(CompanionSettings settings, DateTimeOffset now, CancellationToken ct)
+    {
+        if (publishQzone is null || qzone is null || now < qzoneRetryAfter) return;
+        if (!QzoneSchedule.ShouldPublish(settings.Qzone, qzone.Load().LastAttemptAt, now)) return;
+        qzone.MarkAttempt(now);
+        var reply = await GenerateAsync(BuildQzonePrompt(), ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        var text = reply.Send ? reply.Text.Trim() : "";
+        if (text.Length == 0) { log("qzone_skipped", new { reason = "model_declined" }); return; }
+        if (text.Length > QzonePublisher.MaximumCharacters) text = text[..QzonePublisher.MaximumCharacters];
+        await publishQzone(text, ct).ConfigureAwait(false);
+        log("qzone_published", new { characters = text.Length });
+    }
+
+    private string BuildQzonePrompt() =>
+        "你叫「" + persona.Name + "」，性格是：" + persona.Personality + "。表达方式是：" + persona.SpeakingStyle + "。" +
+        "现在你要自己在 QQ 空间发一条说说，没有人要求你发，也没有人在这场对话里。" +
+        "只写你自己此刻的心情或很小的一件日常，1～2句、不超过60字，口语、自然，像真人随手发的，可以有一点小情绪。" +
+        "不要复述和任何人的聊天内容，不要出现具体人名、称呼关系、约定、地点、联系方式或密码之类的隐私；不要提系统、定时、模型、动态、空间这些词；不要用列表、Markdown 或表情编号。" +
+        "实在没什么可说的也可以不发。" +
+        "只回复严格JSON对象{\"send\":true或false,\"text\":\"说说内容\"}，text为字符串，不想发时为空字符串；不要输出其他字段、Markdown或JSON之外的文字。";
 
     private async Task WakeAsync(long user, CompanionSettings settings, PrivateChatContactStatus? contact,
         DateTimeOffset now, CancellationToken ct)
@@ -180,13 +293,16 @@ public sealed class CompanionRuntime
 
     private string BuildWakePrompt(long user, CompanionSnapshot snapshot, int idleMinutes)
     {
+        var current = PersonaFor(user);
         var context = store.BuildContext(user, WakeContextCharacters);
         var history = contacts.BuildPrivateHistoryContext(user);
         var idle = idleMinutes >= 60 ? (idleMinutes / 60) + "小时" : Math.Max(1, idleMinutes) + "分钟";
-        return "你叫「" + persona.Name + "」，性格是：" + persona.Personality + "。表达方式是：" + persona.SpeakingStyle + "。" +
-            "现在没有新消息，只是定时唤醒：「" + persona.UserAddress + "」已经" + idle + "没跟你说话了。" +
+        return "你叫「" + current.Name + "」，性格是：" + current.Personality + "。表达方式是：" + current.SpeakingStyle + "。" +
+            "现在没有新消息，只是定时唤醒：「" + current.UserAddress + "」已经" + idle + "没跟你说话了。" +
             "你可以主动发一条私聊，也可以决定不打扰。可以主动的理由只有三类：1) 你们约过还没做的事；2) 你有点想他；3) 只是随性想聊两句。" +
             "没有真实理由、或者这条消息只是在追问、催促、道歉刷屏时，就 send=false。频率由本地控制，不要因为无聊而每次都发。" +
+            "开口前先看下面的近期私聊记录：对方最近说过要去睡、已经睡了或者在忙的时候，不要问「睡没睡」「有没有想我」这类要他回话的问题，最多留一句不打扰的话，或者直接 send=false。" +
+            "不要重复你上一条主动消息说过的事，也不要把已经兑现、已经给过的东西再说成还欠着；同一件事不要连着催。" +
             context + (history.Length == 0 ? "" : "\n" + history) +
             "\n发的话要像真人随口发来的一条：自然口语、1～2句、不超过100字，不解释这是定时唤醒或系统提醒，不用列表和Markdown，不每次都用同一句开场。只发一条。" +
             "只回复严格JSON对象{\"send\":true或false,\"text\":\"正文\"}，text为字符串，不想发时为空字符串；不要输出其他字段、Markdown或JSON之外的文字。";

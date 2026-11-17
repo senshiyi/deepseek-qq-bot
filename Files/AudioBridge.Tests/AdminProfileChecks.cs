@@ -13,6 +13,7 @@ public static class AdminProfileChecks
         {
             ("absent store returns defaults without creating a file", Defaults),
             ("persona and explicit notes survive a new store instance", Persistence),
+            ("per-contact personas override only the fields they set", ContactPersonas),
             ("legacy persona files keep group sharing disabled and new switches persist", LegacyGroupSettings),
             ("persona confirmation compares and saves under one cross-instance lock", ConcurrentPersonaConfirmation),
             ("updates keep identity and deletion leaves no private backup", UpdateAndDelete),
@@ -30,6 +31,36 @@ public static class AdminProfileChecks
             Console.WriteLine("PASS admin profile: " + check.Name);
         }
         return checks.Length;
+    }
+
+    private static Task ContactPersonas()
+    {
+        using var folder = new Folder();
+        var store = new BotProfileStore(folder.Root);
+        var global = store.GetPersona();
+        Check(store.GetContactPersona(20) is null && store.EffectivePersona(20) == global, "a contact without a persona did not fall back to the global one");
+        store.SaveContactPersona(new(20, "小柚", null, "哥哥", null));
+        var saved = store.GetContactPersona(20)!;
+        Check(saved is { UserId: 20, Name: "小柚", UserAddress: "哥哥" } && saved.Personality is null, "saved persona kept the wrong fields");
+        var effective = new BotProfileStore(folder.Root).EffectivePersona(20);
+        Check(effective.Name == "小柚" && effective.UserAddress == "哥哥" &&
+              effective.Personality == global.Personality && effective.SpeakingStyle == global.SpeakingStyle,
+            "per-contact fields did not override only what they set");
+        Check(store.EffectivePersona(21) == global, "another contact inherited someone else's persona");
+        store.SaveContactPersona(new(20, "小柚2", "更黏人", "哥哥", null));
+        Check(store.EffectivePersona(20) is { Name: "小柚2", Personality: "更黏人" }, "saving again did not replace the same contact's persona");
+        Check(store.DeleteContactPersona(20) && !store.DeleteContactPersona(20), "delete did not remove exactly one persona");
+        Check(store.EffectivePersona(20) == global, "deleting the persona did not restore the global one");
+        foreach (var invalid in new[]
+        {
+            new ContactPersona(0, "x", null, null, null), new ContactPersona(20, null, null, null, null),
+            new ContactPersona(20, new string('x', 17), null, null, null), new ContactPersona(20, null, null, new string('x', 33), null)
+        })
+        {
+            try { store.SaveContactPersona(invalid); throw new Exception("invalid contact persona was accepted"); }
+            catch (ArgumentException) { }
+        }
+        return Task.CompletedTask;
     }
 
     private static Task Defaults()

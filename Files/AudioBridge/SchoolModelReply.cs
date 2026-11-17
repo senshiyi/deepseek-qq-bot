@@ -37,7 +37,7 @@ public sealed class SchoolUsageBudget
             var nextCalls = checked(calls + 1);
             if (settings.MaxCalls is { } maxCalls && calls >= maxCalls ||
                 settings.MaxPoints is { } maxPoints && nextReserved > maxPoints)
-                throw new InvalidOperationException("学校模型累计点数或调用次数已达配置上限；本次未调用，不重置既有累计。");
+                throw ReplyFailure.Tag(new InvalidOperationException("学校模型累计点数或调用次数已达配置上限；本次未调用，不重置既有累计。"), "school_budget");
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
@@ -122,12 +122,39 @@ public sealed class SchoolModelReply : IStreamingReply, IDisposable
         this.systemPrompt = systemPrompt + (this.images.Count == 0 ? TextOnly : ImageTurn);
         this.timeout = timeout;
         this.maximumOutputTokens = maximumOutputTokens;
-        handler ??= new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false,
-            AutomaticDecompression = DecompressionMethods.None, ConnectTimeout = TimeSpan.FromSeconds(5), MaxResponseHeadersLength = 32 };
+        handler ??= CreateHandler(settings);
         if (handler is SocketsHttpHandler sockets) { sockets.AllowAutoRedirect = false; sockets.UseCookies = false; }
         if (handler is HttpClientHandler client) { client.AllowAutoRedirect = false; client.UseCookies = false; }
         http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", key);
+    }
+
+    /// <summary>
+    /// 校内模型入口一律直连：Clash 这类系统代理会把 10.x 校内网关当成外网转给节点，TLS 握手直接失败。
+    /// 只有调用方显式传 handler 时（测试）才沿用它的代理设置。
+    /// </summary>
+    internal static SocketsHttpHandler CreateHandler(SchoolModelSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false, UseCookies = false, UseProxy = false,
+            AutomaticDecompression = DecompressionMethods.None, ConnectTimeout = TimeSpan.FromSeconds(5), MaxResponseHeadersLength = 32
+        };
+        if (string.IsNullOrWhiteSpace(settings.ResolveIp)) return handler;
+        // 本地 DNS 把网关的内网 A 记录过滤掉时（smartdns/Clash 很常见），用配置的 IP 直连；SNI 和证书仍按域名走。
+        var address = IPAddress.Parse(settings.ResolveIp.Trim());
+        handler.ConnectCallback = async (context, token) =>
+        {
+            var socket = new System.Net.Sockets.Socket(address.AddressFamily, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp) { NoDelay = true };
+            try
+            {
+                await socket.ConnectAsync(new IPEndPoint(address, context.DnsEndPoint.Port), token).ConfigureAwait(false);
+                return new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
+            }
+            catch { socket.Dispose(); throw; }
+        };
+        return handler;
     }
 
     public async IAsyncEnumerable<string> StreamAsync(IReadOnlyList<ChatTurn> history, [EnumeratorCancellation] CancellationToken ct)
@@ -200,7 +227,11 @@ public sealed class SchoolModelReply : IStreamingReply, IDisposable
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw new OperationCanceledException("学校模型请求已取消，既有点数预留保留；不自动重试。", ct); }
         catch (Exception error) when (error is OperationCanceledException or HttpRequestException or IOException or JsonException or InvalidOperationException or DecoderFallbackException or KeyNotFoundException)
-        { throw new IOException("学校模型请求超时、失败或响应不完整；既有点数预留保留，不自动重试或切换服务。"); }
+        {
+            // 预算上限这类已经分类过的错误保留原码，别盖成"接口连不上"。
+            if (ReplyFailure.HasCode(error)) throw;
+            throw ReplyFailure.Tag(new IOException("学校模型请求超时、失败或响应不完整；既有点数预留保留，不自动重试或切换服务。"), "school_unavailable");
+        }
     }
 
     private string ParseComplete(string body)

@@ -38,6 +38,9 @@ public sealed class MemeLibrary
 
     public IReadOnlyList<MemeEntry> List() { lock (gate) return Load(); }
 
+    /// <summary>QQ 原生表情的 ID 约定；提示词要靠它区分"普通小表情"和图片表情包。</summary>
+    public static bool IsFaceId(string id) => id.StartsWith("qq_face_", StringComparison.Ordinal);
+
     internal string ImportMutexName => writerMutexName;
 
     public MemeAsset Get(string id)

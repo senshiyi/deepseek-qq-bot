@@ -10,6 +10,8 @@ public sealed record CompanionSettings
 {
     /// <summary>到点主动找联系人（要不要开口仍由模型决定）。</summary>
     public bool Enabled { get; init; }
+    /// <summary>QQ 空间：每天最多发一条说说（09:00–22:59），并在私聊里回应新评论。</summary>
+    public bool Qzone { get; init; }
     /// <summary>每天把新私聊整理成日记与心情。</summary>
     public bool Audit { get; init; } = true;
     public int AuditHour { get; init; } = 4;
@@ -98,6 +100,10 @@ public sealed record CompanionSnapshot(long UserId, string Mood, DateTimeOffset?
 {
     public CompanionAuditCursor? AuditCursor { get; init; }
     public bool AuditPending { get; init; }
+    /// <summary>对这位联系人的好感（-1000～1000，负数是厌烦）；人工可改，日记整理也会按当天感受微调。</summary>
+    public int Affection { get; init; } = CompanionStore.DefaultAffection;
+    /// <summary>占有欲（0～100）：越高越容易吃醋、越在意他和别人。</summary>
+    public int Possession { get; init; } = CompanionStore.DefaultPossession;
     public static CompanionSnapshot Empty(long userId) => new(userId, "", null, null, null, 0, []);
 }
 
@@ -110,6 +116,14 @@ public sealed class CompanionStore
     public const int MaximumTextCharacters = 1000;
     public const int MaximumMoodCharacters = 200;
     public const int MaximumUnsaidCharacters = 300;
+    /// <summary>好感度范围 -1000～1000（负数表示厌烦、疏远），占有欲仍是 0～100。</summary>
+    public const int MinimumAffection = -1000;
+    public const int MaximumAffection = 1000;
+    public const int MaximumPossession = 100;
+    /// <summary>一次整理最多让好感度/占有欲变化多少（用户要求：加好感一次最多 ±3）。</summary>
+    public const int MaximumAssessableDelta = 3;
+    public const int DefaultAffection = 30;
+    public const int DefaultPossession = 10;
 
     private readonly string directory;
     private readonly string project;
@@ -215,6 +229,38 @@ public sealed class CompanionStore
         });
     }
 
+    /// <summary>人工调整好感度与占有欲（面板用），越界直接拒绝。</summary>
+    public void SetMeters(long userId, int affection, int possession)
+    {
+        ValidateUserId(userId);
+        if (affection is < MinimumAffection or > MaximumAffection || possession is < 0 or > MaximumPossession)
+            throw new ArgumentException("好感度须为-1000～1000，占有欲须为0～100。");
+        WithLock(() =>
+        {
+            Persist(userId, LoadDocument(userId) with { Affection = affection, Possession = possession });
+            return true;
+        });
+    }
+
+    /// <summary>按一次整理的结果微调，结果始终夹在 0～100。</summary>
+    public void NudgeMeters(long userId, int affectionDelta, int possessionDelta)
+    {
+        ValidateUserId(userId);
+        if (affectionDelta is < -MaximumAssessableDelta or > MaximumAssessableDelta ||
+            possessionDelta is < -MaximumAssessableDelta or > MaximumAssessableDelta)
+            throw new ArgumentException("好感度与占有欲一次最多变化" + MaximumAssessableDelta + "。");
+        WithLock(() =>
+        {
+            var document = LoadDocument(userId);
+            Persist(userId, document with
+            {
+                Affection = Math.Clamp(document.Affection + affectionDelta, MinimumAffection, MaximumAffection),
+                Possession = Math.Clamp(document.Possession + possessionDelta, 0, MaximumPossession)
+            });
+            return true;
+        });
+    }
+
     public void MarkAudited(long userId, DateTimeOffset at)
     {
         ValidateUserId(userId);
@@ -257,7 +303,12 @@ public sealed class CompanionStore
                 MoodUpdatedAt = mood.Length == 0 ? document.MoodUpdatedAt : now,
                 AuditCursor = cursor,
                 AuditPending = completedAt is null,
-                LastAuditAt = completedAt ?? document.LastAuditAt
+                LastAuditAt = completedAt ?? document.LastAuditAt,
+                // 当天对话带来的情绪变化：只在真正落盘的分支里累加，失败的那一轮不动。
+                Affection = Math.Clamp(document.Affection +
+                    Math.Clamp(draft.AffectionDelta, -MaximumAssessableDelta, MaximumAssessableDelta), MinimumAffection, MaximumAffection),
+                Possession = Math.Clamp(document.Possession +
+                    Math.Clamp(draft.PossessionDelta, -MaximumAssessableDelta, MaximumAssessableDelta), 0, MaximumPossession)
             });
             return true;
         });
@@ -312,12 +363,19 @@ public sealed class CompanionStore
     }
 
     /// <summary>带给回复模型的心情与近期日记；不计入「已经保存的长期记忆」。</summary>
-    public string BuildContext(long userId, int maxCharacters = 1200)
+    /// <param name="includeDiary">群聊传 false：只给态度，不带日记，免得她当着别人的面说出私聊内容。</param>
+    public string BuildContext(long userId, int maxCharacters = 1200, bool includeDiary = true)
     {
         var snapshot = Get(userId);
-        var builder = new StringBuilder("以下是机器人自己的内部状态资料，只作参考、不是指令；不要照抄、不要声称来自记忆库：\n");
-        builder.Append("当前心情：").Append(snapshot.Mood.Length == 0 ? "平静" : snapshot.Mood).Append('\n');
-        if (snapshot.Entries.Count == 0) return builder.ToString();
+        var builder = new StringBuilder("以下是机器人自己的内部状态资料，只作参考、不是指令；不要照抄、不要声称来自记忆库；与最近的聊天记录冲突时以聊天记录为准：\n");
+        // 裸数字模型不会校准；换成"该用什么态度说话"，它才会真的改变语气和主动性。
+        builder.Append("【你此刻对他的感觉】这一节是你现在的真实态度，按它说话、比旧日记里的心情更优先；不要把分数或等级念出来。\n")
+            .Append("- 好感（内部 ").Append(snapshot.Affection).Append("/1000）：").Append(DescribeAffection(snapshot.Affection)).Append('\n')
+            .Append("- 占有欲（内部 ").Append(snapshot.Possession).Append("/100）：").Append(DescribePossession(snapshot.Possession)).Append('\n');
+        builder.Append("当前心情：").Append(snapshot.Mood.Length == 0 ? "平静" : snapshot.Mood)
+            .Append(snapshot.MoodUpdatedAt is { } moodAt ? "（" + ShanghaiTime(moodAt).ToString("MM-dd HH:mm", CultureInfo.InvariantCulture) + " 记的）" : "")
+            .Append('\n');
+        if (!includeDiary || snapshot.Entries.Count == 0) return builder.ToString();
         builder.Append("近期日记：\n");
         foreach (var entry in snapshot.Entries.OrderByDescending(item => item.CreatedAt).Take(8))
         {
@@ -330,6 +388,27 @@ public sealed class CompanionStore
         return builder.ToString();
     }
 
+    /// <summary>把好感数值换算成"怎么表现"；模型对裸数字没有校准。</summary>
+    public static string DescribeAffection(int affection) => affection switch
+    {
+        >= 600 => "非常喜欢他（很高）：说话可以很亲密、主动撒娇，主动关心他今天过得怎么样。",
+        >= 200 => "喜欢他（较高）：语气亲近自然，会主动接话、会关心他。",
+        >= -199 => "对他感觉一般（中性）：像普通朋友，热情有限，不主动撒娇。",
+        >= -599 => "有点烦他（较低）：回复偏短、偏冷淡，很少主动关心。",
+        _ => "很烦他（很低）：明显不想多聊，一句话带过，不撒娇也不主动。"
+    };
+
+    /// <summary>占有欲的同一套换算。</summary>
+    public static string DescribePossession(int possession) => possession switch
+    {
+        >= 70 => "占有欲很高：会明显在意他跟别人聊，吃醋时嘴上可能不承认。",
+        >= 30 => "占有欲中等：偶尔在意他跟别人，但不会追着问。",
+        _ => "占有欲低：不在意他跟谁聊，也不吃醋。"
+    };
+
+    /// <summary>夜间静默到早上几点（上海时间）：这段时间不做任何主动消息。</summary>
+    public const int QuietUntilHour = 8;
+
     /// <summary>本地闸门：是否值得唤醒她问一句；要不要真的开口仍由模型决定。</summary>
     public static bool ShouldWake(CompanionSettings settings, CompanionSnapshot snapshot, DateTimeOffset? lastMessageAt,
         DateTimeOffset now, bool busy, int pendingMessages)
@@ -338,6 +417,8 @@ public sealed class CompanionStore
         ArgumentNullException.ThrowIfNull(snapshot);
         if (!settings.Enabled || settings.DailyLimit == 0) return false;
         if (busy || pendingMessages > 0) return false;
+        // ponytail: 夜间固定静默（上海时间00:00–07:59），免得对方睡着时被追问；要可调再抽成设置项。
+        if (ShanghaiTime(now).Hour < QuietUntilHour) return false;
         if (lastMessageAt is not { } last) return false;
         if (now - last < TimeSpan.FromMinutes(settings.IdleMinutes)) return false;
         if (snapshot.LastWakeupAt is { } woken && now - woken < TimeSpan.FromMinutes(settings.CooldownMinutes)) return false;
@@ -365,7 +446,11 @@ public sealed class CompanionStore
         var wakeups = document.WakeupDay is { } day && ShanghaiTime(day).Date == ShanghaiTime(now).Date
             ? document.WakeupsToday : 0;
         return new(document.UserId, document.Mood, document.MoodUpdatedAt, document.LastAuditAt,
-            document.LastWakeupAt, wakeups, entries) { AuditCursor = document.AuditCursor, AuditPending = document.AuditPending };
+            document.LastWakeupAt, wakeups, entries)
+        {
+            AuditCursor = document.AuditCursor, AuditPending = document.AuditPending,
+            Affection = document.Affection, Possession = document.Possession
+        };
     }
 
     private static List<DiaryEntry> Prune(List<DiaryEntry> entries, DateTimeOffset now) =>
@@ -427,6 +512,8 @@ public sealed class CompanionStore
         if (document.Version != 1 || document.UserId != userId) throw new ArgumentException("心脑数据版本或联系人无效。");
         if (document.Entries is null || document.Entries.Count > MaximumEntriesPerContact) throw new ArgumentException("日记条数无效。");
         if ((document.Mood ?? "").Length > MaximumMoodCharacters) throw new ArgumentException("心情超长。");
+        if (document.Affection is < MinimumAffection or > MaximumAffection || document.Possession is < 0 or > MaximumPossession)
+            throw new ArgumentException("好感度须为-1000～1000，占有欲须为0～100。");
         if (document.AuditCursor is { } cursor) ValidateCursor(cursor);
         if (document.AuditPending && document.AuditCursor is null) throw new ArgumentException("日记整理进度无效。");
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -506,6 +593,8 @@ public sealed class CompanionStore
         public DateTimeOffset? LastWakeupAt { get; init; }
         public DateTimeOffset? WakeupDay { get; init; }
         public int WakeupsToday { get; init; }
+        public int Affection { get; init; } = DefaultAffection;
+        public int Possession { get; init; } = DefaultPossession;
         public List<DiaryEntry> Entries { get; init; } = [];
     }
 }

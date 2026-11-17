@@ -4,6 +4,12 @@ $ErrorActionPreference='Stop'
 if([string]::IsNullOrWhiteSpace($ProjectRoot)){$ProjectRoot=Split-Path -Parent $PSScriptRoot}
 $ProjectRoot=(Resolve-Path -LiteralPath $ProjectRoot).Path
 Import-Module (Join-Path $PSScriptRoot 'BridgeBuild.psm1') -Force
+# 机器人启动时顺带启动本机 Breeze 语音服务（已在运行则跳过）；语音没启用或启动失败都不影响聊天。
+$breezeLauncher=Join-Path $PSScriptRoot 'Start-Breeze.ps1'
+if(Test-Path -LiteralPath $breezeLauncher){
+    try{ & $breezeLauncher -ProjectRoot $ProjectRoot }
+    catch{ Write-Host ('Breeze 语音服务未启动：'+$_.Exception.Message) -ForegroundColor Yellow }
+}
 $launchLock=$null
 $locationPushed=$false
 function Read-PositiveId($Value){

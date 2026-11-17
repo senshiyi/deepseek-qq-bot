@@ -104,9 +104,9 @@ public static class ReceivedImageChecks
     private static Task Bounds()
     {
         var clock = new Clock(); var inbox = new ReceivedImageInbox(1, clock);
-        for (var i = 0; i < 60; i++) { using var item = Event(clock, messageId: i + 1); Check(Admit(inbox, item, clock), "bounded catalog stopped accepting latest events"); }
+        for (var i = 0; i < ReceivedImageInbox.MaximumItems + 12; i++) { using var item = Event(clock, messageId: i + 1); Check(Admit(inbox, item, clock), "bounded catalog stopped accepting latest events"); }
         Check(inbox.List().Count == ReceivedImageInbox.MaximumItems && inbox.List().All(item => item.MessageId > 12), "old candidates were not evicted");
-        clock.Now = clock.Now.AddMinutes(10);
+        clock.Now = clock.Now.AddHours(25);
         Check(inbox.List().Count == 0, "expired candidate remained");
         using var next = Event(clock, messageId: 100); Check(Admit(inbox, next, clock), "new candidate rejected after expiry");
         inbox.Clear(); Check(inbox.List().Count == 0, "clear left catalog");

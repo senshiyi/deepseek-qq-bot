@@ -127,57 +127,9 @@ public sealed class WindowsVoiceSpeaker : IVoiceSpeaker, IAsyncDisposable
         }
     }
 
-    private async Task<byte[]> SynthesizeCoreAsync(string text, CancellationToken ct)
-    {
-        using var output = new MemoryStream();
-        var synthesizer = new SpeechSynthesizer();
-        var access = new object();
-        var disposed = false;
-        var complete = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Observe(complete.Task);
-        void OnCompleted(object? sender, SpeakCompletedEventArgs args)
-        {
-            if (args.Error is not null) complete.TrySetException(args.Error);
-            else if (args.Cancelled) complete.TrySetCanceled();
-            else complete.TrySetResult();
-        }
-        synthesizer.SpeakCompleted += OnCompleted;
-        var cancellation = ct.Register(() =>
-        {
-            // Do not block the caller's cancellation on a SAPI/native call or a held startup lock.
-            _ = Task.Run(() =>
-            {
-                try { lock (access) { if (!disposed) synthesizer.SpeakAsyncCancelAll(); } }
-                catch (Exception error) { complete.TrySetException(error); }
-            });
-        });
-        try
-        {
-            lock (access)
-            {
-                ct.ThrowIfCancellationRequested();
-                synthesizer.SelectVoice(voiceName);
-                synthesizer.Rate = rate;
-                synthesizer.Volume = 100;
-                synthesizer.SetOutputToAudioStream(output, new SpeechAudioFormatInfo(16000, AudioBitsPerSample.Sixteen, AudioChannel.Mono));
-                ct.ThrowIfCancellationRequested();
-                synthesizer.SpeakAsync(text);
-            }
-            await complete.Task.ConfigureAwait(false);
-            ct.ThrowIfCancellationRequested();
-            return output.ToArray();
-        }
-        finally
-        {
-            cancellation.Dispose();
-            lock (access)
-            {
-                disposed = true;
-                synthesizer.SpeakCompleted -= OnCompleted;
-                synthesizer.Dispose();
-            }
-        }
-    }
+    /// <summary>SAPI 合成本机 PCM；具体实现在 LocalSpeechSynthesis，与 QQ 语音共用。</summary>
+    private Task<byte[]> SynthesizeCoreAsync(string text, CancellationToken ct) =>
+        LocalSpeechSynthesis.SynthesizePcmAsync(text, voiceName, rate, ct);
 
     internal static IEnumerable<string> SplitSentences(string text)
     {

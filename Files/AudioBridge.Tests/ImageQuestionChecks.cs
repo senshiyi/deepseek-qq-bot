@@ -30,7 +30,8 @@ public static class ImageQuestionChecks
             ("an uncooperative download cannot hold a voice question past its deadline", Deadline),
             ("caller cancellation propagates and prevents late image attachment", Cancellation),
             ("chat context attaches the newest image once and keys it per chat", ChatAttach),
-            ("the real QQ image host is accepted and a rejected host is reported without downloading", RealHosts)
+            ("the real QQ image host is accepted and a rejected host is reported without downloading", RealHosts),
+            ("saving a sticker resolves the newest authorized image without the seen cursor", NewestForSaving)
         };
         foreach (var check in checks)
         {
@@ -334,6 +335,26 @@ public static class ImageQuestionChecks
         var denied = await blocked.ResolveChatAsync("123", 1, false, "看看这张", Now, default);
         Check(denied.Clarification is not null && denied.Images.Count == 0 && blockedDownloads == 0, "a non-QQ host was downloaded");
         Check(rejected.SequenceEqual(["evil.example"]), "the rejected host was not reported");
+    }
+
+    private static async Task NewestForSaving()
+    {
+        var stamp = DateTimeOffset.UtcNow;
+        var inbox = new GroupImageInbox("123");
+        inbox.AddEvent(Event(["https://gchat.qpic.cn/old.png"], 1, time: stamp.AddSeconds(-30)), stamp);
+        inbox.AddEvent(Event(["https://gchat.qpic.cn/new.png"], 2, time: stamp), stamp);
+        var handler = Handler((_, _) => Task.FromResult(PngResponse()));
+        using var context = new ImageQuestionContext(inbox, "123", handler);
+        var first = await context.ResolveNewestAsync("123", default);
+        var again = await context.ResolveNewestAsync("123", default);
+        Check(first is not null && again is not null && handler.Calls == 2, "the newest image was not resolved twice for saving");
+        Check(first!.DataUrl == "data:image/png;base64," + Convert.ToBase64String(TinyPng), "saving resolved different bytes");
+        Check(await context.ResolveNewestAsync("999", default) is null && handler.Calls == 2, "another chat reached the saving downloader");
+        var unsafeInbox = new GroupImageInbox("123");
+        unsafeInbox.AddEvent(Event(["https://evil.example.com/x.png"], 3, time: stamp), stamp);
+        using var unsafeContext = new ImageQuestionContext(unsafeInbox, "123", handler);
+        Check(await unsafeContext.ResolveNewestAsync("123", default) is null && handler.Calls == 2,
+            "an unlisted host reached the saving downloader");
     }
 
     private static GroupImageInbox Inbox(params string[] urls) => Inbox(urls, Now);

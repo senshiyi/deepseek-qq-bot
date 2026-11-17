@@ -32,6 +32,7 @@ public static class SchoolApiChecks
             ("HTTP/redirect/transport errors hide credentials and preserve spend", Errors),
             ("declared and streamed response size are bounded", BodyLimit),
             ("handler forbids redirects/cookies while preserving system proxy", HandlerOptions),
+            ("default handler bypasses the system proxy for the campus gateway", HandlerBypassesProxy),
             ("vision turn sends image blocks only when images are provided", VisionTurn),
             ("vision caption uses the vision model and rejects empty descriptions", VisionCaption)
         };
@@ -50,6 +51,9 @@ public static class SchoolApiChecks
         foreach (var url in new[] { "http://myai.bupt.edu.cn/llm-gw/v1/", "https://example.com/llm-gw/v1/", "https://127.0.0.1/llm-gw/v1/",
             "https://key@myai.bupt.edu.cn/llm-gw/v1/", "https://myai.bupt.edu.cn:444/llm-gw/v1/", "https://myai.bupt.edu.cn/llm-gw/v1/?key=x", "https://myai.bupt.edu.cn/wrong/" })
             Reject(() => (Settings with { BaseUrl = url }).Validate());
+        foreach (var ip in new[] { "not-an-ip", "10.3.19.2/24", "myai.bupt.edu.cn" })
+            Reject(() => (Settings with { ResolveIp = ip }).Validate());
+        Check((Settings with { ResolveIp = " 10.3.19.2 " }).ResolveIp is not null, "a valid pinned IP was lost");
         Check(!File.Exists(folder.PathOf("absent.json")), "invalid configuration created ledger");
         File.WriteAllText(folder.PathOf("settings.json"), JsonSerializer.Serialize(Settings));
         Check(SchoolModelSettings.Load(folder.PathOf("settings.json")).Model == "fixture-model", "settings did not load");
@@ -357,6 +361,16 @@ public static class SchoolApiChecks
         using var folder = new Folder(); var handler = new HttpClientHandler { UseProxy = true };
         using var reply = new SchoolModelReply(Settings, Key, new SchoolUsageBudget(folder.Ledger, Settings), "Reply JSON", handler);
         Check(handler.UseProxy && !handler.AllowAutoRedirect && !handler.UseCookies, "proxy/redirect/cookie configuration wrong");
+        return Task.CompletedTask;
+    }
+
+    private static Task HandlerBypassesProxy()
+    {
+        using var plain = SchoolModelReply.CreateHandler(Settings);
+        Check(!plain.UseProxy && !plain.AllowAutoRedirect && !plain.UseCookies && plain.ConnectCallback is null,
+            "the default school handler still routes the campus gateway through the system proxy");
+        using var pinned = SchoolModelReply.CreateHandler(Settings with { ResolveIp = "10.3.19.2" });
+        Check(pinned.ConnectCallback is not null, "a pinned school IP did not become a connect callback");
         return Task.CompletedTask;
     }
 

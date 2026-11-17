@@ -13,6 +13,8 @@ public sealed record SchoolModelSettings
     public decimal? MaxPoints { get; init; }
     public int? MaxCalls { get; init; } = 10;
     public bool Stream { get; init; }
+    /// <summary>可选的 DNS 兜底：本机解析器把网关的内网 A 记录过滤掉时，直连这个 IP（TLS 仍按域名校验）。</summary>
+    public string? ResolveIp { get; init; }
 
     public static SchoolModelSettings Load(string path = "school-api.local.json")
     {
@@ -41,6 +43,8 @@ public sealed record SchoolModelSettings
             throw new ArgumentException("学校输入/输出点价必须明确填写且不为负；累计点数上限须不为负，调用次数上限范围1～1000；null表示不设对应累计上限。");
         if (MaxPoints == 0 && (InputPointsPerMillion != 0 || OutputPointsPerMillion != 0))
             throw new ArgumentException("点数上限为0时仅允许用户已明确填写的双零价格。");
+        if (!string.IsNullOrWhiteSpace(ResolveIp) && !System.Net.IPAddress.TryParse(ResolveIp.Trim(), out _))
+            throw new ArgumentException("resolveIp 只能填一个有效的 IP 地址，留空表示按系统 DNS 解析。");
     }
 
     internal Uri ChatEndpoint => new(BaseUrl.TrimEnd('/') + "/chat/completions");

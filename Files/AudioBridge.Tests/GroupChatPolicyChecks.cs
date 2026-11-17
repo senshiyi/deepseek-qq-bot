@@ -17,6 +17,7 @@ public static class GroupChatPolicyChecks
         var checks = new (string Name, Func<Task> Run)[]
         {
             ("OneBot identity/type/time filters and safe summaries", ParseFilters),
+            ("sender card and nickname label speakers without becoming instructions", SenderNames),
             ("mention/name/active/manual trigger separation", Modes),
             ("concurrent duplicate reserves exactly one candidate", ConcurrentDuplicate),
             ("concurrent different messages cannot overlap a group reservation", ConcurrentCandidates),
@@ -64,6 +65,26 @@ public static class GroupChatPolicyChecks
         return JsonSerializer.SerializeToElement(node);
     }
 
+    private static Task SenderNames()
+    {
+        var policy = Policy();
+        var named = Change(Event(), "sender", new { user_id = 20, card = "小明", nickname = "xm" });
+        Assert(policy.TryParse(named, out var parsed, out _, Now) && parsed!.DisplayName == "小明", "group card did not become the speaker label");
+        var nickname = Change(Event(), "sender", new { user_id = 20, card = "", nickname = " 阿花\n第二行\t " });
+        Assert(policy.TryParse(nickname, out var fallback, out _, Now) && fallback!.DisplayName == "阿花 第二行", "nickname fallback or whitespace cleanup failed");
+        var bounded = Change(Event(), "sender", new { user_id = 20, nickname = new string('名', 60) });
+        Assert(policy.TryParse(bounded, out var limited, out _, Now) && limited!.DisplayName.Length == 24, "speaker label was not bounded");
+        var junk = Change(Event(), "sender", new { user_id = 20, card = new { evil = "[CQ:at,qq=99]" }, nickname = 7 });
+        Assert(policy.TryParse(junk, out var plain, out _, Now) && plain!.DisplayName == "", "a non-string name invented a speaker label");
+        var mention = Event(new object[] { new { type = "at", data = new { qq = "21" } } });
+        Assert(policy.TryParse(mention, out var target, out _, Now) && target!.Text == "[@成员21]", "mention target lost its identity");
+        Assert(target!.AddressedElsewhere, "a message addressed to another member was not marked as someone else's business");
+        var toBot = Event(new object[] { new { type = "at", data = new { qq = "99" } } });
+        Assert(policy.TryParse(toBot, out var atBot, out _, Now) && atBot!.Mentioned && !atBot.AddressedElsewhere,
+            "a mention of the bot was mistaken for someone else's business");
+        return Task.CompletedTask;
+    }
+
     private static Task ParseFilters()
     {
         var policy = Policy();
@@ -109,6 +130,10 @@ public static class GroupChatPolicyChecks
         Assert(Policy(GroupChatMode.Active).Decide(Message(1, mentioned: false, text: "有人能帮我吗"), Now).ShouldReply, "active help candidate ignored");
         Assert(Policy(GroupChatMode.Active).Decide(Message(1, mentioned: false, text: "大家晚上好"), Now) is { ShouldReply: true, Trigger: GroupChatTrigger.Ambient }, "active mode never offered substantive chatter or mislabeled it");
         Assert(Policy(GroupChatMode.Active).Decide(Message(1, mentioned: false, text: "哈哈"), Now).ShouldReply, "reaction candidate ignored");
+        var toSomeoneElse = Message(1, mentioned: false, text: "[@成员21] 你看这个") with { AddressedElsewhere = true };
+        Assert(!Policy(GroupChatMode.Active).Decide(toSomeoneElse, Now).ShouldReply, "a message addressed to another member was answered");
+        Assert(Policy(GroupChatMode.Active).Decide(Message(2, mentioned: false, text: "大家晚上好"), Now).ShouldReply,
+            "an ordinary message after someone else's business stopped being a candidate");
         Assert(!Policy(GroupChatMode.Active).Decide(Message(1, mentioned: false, text: "[图片]"), Now).ShouldReply, "bare image spent AI candidate budget");
         Assert(!Policy(GroupChatMode.Active).Decide(Message(1, mentioned: false, text: "嗯"), Now).ShouldReply, "one-character particle spent an ambient opportunity");
         Assert(!Policy(GroupChatMode.Manual).Decide(Message(1), Now).ShouldReply, "manual mode auto-replied");

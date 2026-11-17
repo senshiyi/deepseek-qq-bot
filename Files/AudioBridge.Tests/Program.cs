@@ -4,6 +4,22 @@ using NAudio.Wave;
 if (args is ["--runner-probe", var probeMode, var probePort])
     return await SuiteProcessChecks.ProbeAsync(probeMode, int.Parse(probePort, System.Globalization.CultureInfo.InvariantCulture));
 if (args is ["--admin-preview"]) { await AdminHttpChecks.PreviewAsync(); return 0; }
+if (args is ["--probe-meme-prompt"]) return await MemePromptProbe.RunAsync();
+if (args is ["--probe-save-scene"]) return await SaveSceneProbe.RunAsync();
+if (args is ["--probe-find-meme"]) return await FindMemeProbe.RunAsync();
+if (args is ["--probe-affection", var affectionUser, var affectionValue]) return await AffectionProbe.RunAsync(long.Parse(affectionUser, System.Globalization.CultureInfo.InvariantCulture), int.Parse(affectionValue, System.Globalization.CultureInfo.InvariantCulture));
+if (args is ["--probe-affection", var groupAffectionUser, var groupAffectionValue, "group"]) return await AffectionProbe.RunAsync(long.Parse(groupAffectionUser, System.Globalization.CultureInfo.InvariantCulture), int.Parse(groupAffectionValue, System.Globalization.CultureInfo.InvariantCulture), group: true);
+if (args is ["--probe-image-payload", var payloadFile]) return ImagePayloadProbe.Run(payloadFile);
+if (args is ["--probe-repeat-guard", var repeatUser]) return await RepeatGuardProbe.RunAsync(long.Parse(repeatUser, System.Globalization.CultureInfo.InvariantCulture));
+if (args is ["--probe-reply-quote", var quoteGroup, var quoteMessage]) return await ReplyQuoteProbe.RunAsync(long.Parse(quoteGroup, System.Globalization.CultureInfo.InvariantCulture), long.Parse(quoteMessage, System.Globalization.CultureInfo.InvariantCulture));
+if (args is ["--probe-persona-draft", var personaUser]) return await PersonaDraftProbe.RunAsync(long.Parse(personaUser, System.Globalization.CultureInfo.InvariantCulture));
+if (args is ["--probe-web"]) return await SelfServiceProbe.WebAsync();
+if (args is ["--probe-voice-roundtrip"]) return await SelfServiceProbe.VoiceRoundTripAsync();
+if (args is ["--probe-voice-send", var probeUser]) return await SelfServiceProbe.VoiceSendAsync(probeUser);
+if (args is ["--probe-voice-reply", var voiceReplyUser]) return await VoiceReplyProbe.RunAsync(long.Parse(voiceReplyUser, System.Globalization.CultureInfo.InvariantCulture));
+if (args is ["--probe-voice-reply", var voiceReplyUserFile, var voiceTriggerFile]) return await VoiceReplyProbe.RunAsync(long.Parse(voiceReplyUserFile, System.Globalization.CultureInfo.InvariantCulture), voiceTriggerFile);
+if (args is ["--probe-breeze"]) return await BreezeProbe.RunAsync();
+if (args is ["--probe-breeze", var breezeUser]) return await BreezeProbe.RunAsync(long.Parse(breezeUser, System.Globalization.CultureInfo.InvariantCulture));
 if (args is ["--vision-probe"]) return await VisionProbe.RunAsync();
 if (args is ["--vision-probe", var probeImage]) return await VisionProbe.RunAsync(probeImage);
 
@@ -41,6 +57,9 @@ var tests = new (string Name, Func<Task> Body)[]
     ("image questions reject unsafe download and require explicit disambiguation", async () => { await ImageQuestionChecks.RunAsync(); }),
     ("DeepSeek attaches bounded image only to the current user question", ApiChecks.ImagePayload),
     ("messaging: local OneBot sends and delivery uncertainty", async () => { await MessageClientChecks.RunAsync(); }),
+    ("messaging: friend requests are approved once, rate limited and never while paused", async () => { await FriendRequestChecks.RunAsync(); }),
+    ("messaging: one self-written space post per day, never retried", async () => { await QzoneChecks.RunAsync(); }),
+    ("messaging: self browsing, QQ voice and self-saved memes", async () => { await SelfServiceChecks.RunAsync(); }),
     ("messaging: curated meme import and path boundaries", async () => { await MemeLibraryChecks.RunAsync(); }),
     ("messaging: selected received images and source boundaries", async () => { await ReceivedImageChecks.RunAsync(); }),
     ("messaging: durable scheduled message definitions and occurrences", async () => { await ScheduledMessageChecks.RunAsync(); }),
@@ -48,11 +67,13 @@ var tests = new (string Name, Func<Task> Body)[]
     ("messaging: group triggers, deduplication and limits", async () => { await GroupChatPolicyChecks.RunAsync(); }),
     ("messaging: private contacts, isolation and late-result cancellation", async () => { await PrivateChatChecks.RunAsync(); }),
     ("messaging: reply cancellation and loopback integration", async () => { await GroupChatFlowChecks.RunAsync(); }),
+    ("messaging: breeze tts engine, emotion and edge fallback", async () => { await BreezeTtsChecks.RunAsync(); }),
     ("messaging: school model transport and independent points budget", async () => { await SchoolApiChecks.RunAsync(); }),
     ("admin: profile and private notes storage", async () => { await AdminProfileChecks.RunAsync(); }),
     ("admin: private history retention and approved public preferences", async () => { await ContactContextChecks.RunAsync(); }),
     ("admin: explicit private memory requests require review", async () => { await MemorySuggestionChecks.RunAsync(); }),
     ("admin: companion mood, diary forgetting and wake gate", async () => { await CompanionChecks.RunAsync(); }),
+    ("admin: automatic long-term notes from private chat", async () => { await MemoryLearnChecks.RunAsync(); }),
     ("admin: observable background lifecycle and model failures", BackgroundRuntimeChecks.RunAsync),
     ("admin: bounded history-to-persona drafts and cancellation", async () => { await PersonaLearningChecks.RunAsync(); }),
     ("admin: persona isolation and bounded model output", async () => { await AdminReplyChecks.RunAsync(); }),

@@ -22,6 +22,7 @@ public static class AdminHttpChecks
             ("explicit private memory suggestions stay isolated and require an idempotent manual save", MemorySuggestionApi),
             ("QQ native faces and selected favorites import through authenticated HTTP", QqEmojis),
             ("received image previews and imports require current source approval and explicit global reuse approval", ReceivedImages),
+            ("stored chat images are listed and served only through the authenticated panel", HistoryImages),
             ("slow favorite previews stay bounded without delaying status or controls; stop cancels and releases", ConcurrentFavoritePreviews),
             ("sixteen pending handlers reject excess work and release cancelled controls", HandlerCapacity),
             ("settings validation, backup, saved/applied state and control allowlist", Settings),
@@ -72,21 +73,22 @@ public static class AdminHttpChecks
         var id = generated.GetProperty("draftId").GetString();
         var confirmed = await fixture.Send("POST", "api/persona-learning/confirm", new
         { draftId = id, name = "审阅后的名字", personality = "开朗耐心", userAddress = "同学", speakingStyle = "自然中文" });
-        Check(confirmed.GetProperty("name").GetString() == "审阅后的名字" &&
-            profiles.GetPersona().ReplyMaxCharacters == before.ReplyMaxCharacters &&
+        Check(confirmed.GetProperty("persona").GetProperty("name").GetString() == "审阅后的名字" &&
+            profiles.GetContactPersona(20)?.Name == "审阅后的名字" && profiles.EffectivePersona(20).UserAddress == "同学" &&
+            profiles.GetPersona() == before && profiles.GetPersona().ReplyMaxCharacters == before.ReplyMaxCharacters &&
             (await fixture.Get("api/status")).GetProperty("restartRequired").GetBoolean(),
-            "confirmation did not save reviewed fields or mutated unrelated settings");
+            "confirmation did not save the contact persona, touched the global persona or mutated unrelated settings");
         using var twice = await fixture.Request("POST", "api/persona-learning/confirm", new
         { draftId = id, name = "重复", personality = "开朗", userAddress = "你", speakingStyle = "自然" });
         Check(twice.StatusCode == HttpStatusCode.BadRequest, "consumed draft could be confirmed again");
         var second = await fixture.Send("POST", "api/persona-learning/generate", new { userId = 20 });
-        profiles.SavePersona(profiles.GetPersona() with { Name = "手动优先" });
+        profiles.SaveContactPersona(new ContactPersona(20, "手动优先", null, null, null));
         using var stale = await fixture.Request("POST", "api/persona-learning/confirm", new
         { draftId = second.GetProperty("draftId").GetString(), name = "过期覆盖", personality = "开朗", userAddress = "你", speakingStyle = "自然" });
-        Check(stale.StatusCode == HttpStatusCode.Conflict && profiles.GetPersona().Name == "手动优先",
-            "stale learning draft overwrote a newer manual persona");
+        Check(stale.StatusCode == HttpStatusCode.Conflict && profiles.GetContactPersona(20)?.Name == "手动优先",
+            "stale learning draft overwrote a newer contact persona");
         var noopDraft = await fixture.Send("POST", "api/persona-learning/generate", new { userId = 20 });
-        var current = profiles.GetPersona();
+        var current = profiles.EffectivePersona(20);
         var confirmations = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => fixture.Request("POST", "api/persona-learning/confirm", new
         {
             draftId = noopDraft.GetProperty("draftId").GetString(), name = current.Name,
@@ -95,7 +97,7 @@ public static class AdminHttpChecks
         try
         {
             Check(confirmations.Count(response => response.StatusCode == HttpStatusCode.OK) == 1 &&
-                confirmations.Count(response => response.StatusCode == HttpStatusCode.BadRequest) == 7 && profiles.GetPersona() == current,
+                confirmations.Count(response => response.StatusCode == HttpStatusCode.BadRequest) == 7 && profiles.EffectivePersona(20) == current,
                 "same no-op draft was consumed more than once by concurrent confirmations");
         }
         finally { foreach (var response in confirmations) response.Dispose(); }
@@ -109,11 +111,22 @@ public static class AdminHttpChecks
         store.SetMood(20, "有点想他");
         var listed = await fixture.Get("api/companion");
         var contact = listed.GetProperty("contacts")[0];
+        Check(contact.TryGetProperty("affection", out var contactAffection) && contactAffection.GetInt32() >= 0 &&
+            contact.TryGetProperty("possession", out _), "the companion listing does not expose the meters");
         Check(contact.GetProperty("mood").GetString() == "有点想他" && contact.GetProperty("entries").GetArrayLength() == 1,
             "companion API hid the saved mood or diary");
         Check(contact.GetProperty("entries")[0].GetProperty("levelLabel").GetString() == "重要" &&
             contact.GetProperty("entries")[0].GetProperty("id").GetString() == entry.Id,
             "companion API lost a diary level label or identifier");
+        var meters = await fixture.Send("PUT", "api/companion/20/meters", new { affection = 77, possession = 12 });
+        Check(meters.GetProperty("affection").GetInt32() == 77 && meters.GetProperty("possession").GetInt32() == 12 &&
+            store.Get(20).Affection == 77 && store.Get(20).Possession == 12, "manual meters were not saved through the panel API");
+        var negative = await fixture.Send("PUT", "api/companion/20/meters", new { affection = -250, possession = 3 });
+        Check(negative.GetProperty("affection").GetInt32() == -250 && store.Get(20).Affection == -250,
+            "negative affection was rejected by the panel API");
+        using var badMeters = await fixture.Request("PUT", "api/companion/20/meters", new { affection = 1001, possession = 0 });
+        Check(badMeters.StatusCode == HttpStatusCode.BadRequest && store.Get(20).Affection == -250,
+            "an out-of-range meter was accepted or overwrote the saved value");
         Check(!listed.GetProperty("settings").GetProperty("enabled").GetBoolean(), "companion defaults enabled the wake loop");
         var saved = await fixture.Send("PUT", "api/companion-settings",
             new { enabled = true, auditHour = 5, idleMinutes = 90, cooldownMinutes = 60, dailyLimit = 3 });
@@ -165,7 +178,17 @@ public static class AdminHttpChecks
         var publicContext = contacts.BuildGroupPreferenceContext(20);
         Check(publicContext.Contains(JsonSerializer.Serialize("同学"), StringComparison.Ordinal) && !publicContext.Contains("PRIVATE_", StringComparison.Ordinal), "group memory included private content");
         contacts.AppendMessage(20, "user", "PRIVATE_RAW", "1");
-        Check((await fixture.Get("api/history?userId=20")).GetArrayLength() == 1, "history not listed");
+        contacts.AppendMessage(20, "user", ContactContextStore.GroupMarker + "GROUP_RAW", "2");
+        var history = await fixture.Get("api/history?userId=20");
+        Check(history.GetArrayLength() == 2 &&
+            history.EnumerateArray().Single(entry => entry.GetProperty("channel").GetString() == "group")
+                .GetProperty("text").GetString() == "GROUP_RAW" &&
+            history.EnumerateArray().Single(entry => entry.GetProperty("channel").GetString() == "private")
+                .GetProperty("text").GetString() == "PRIVATE_RAW",
+            "history listing did not separate group lines from private ones or leaked the marker");
+        Check((await fixture.Get("api/history?userId=20&limit=1")).GetArrayLength() == 1, "the history limit was ignored");
+        using var badLimit = await fixture.Request("GET", "api/history?userId=20&limit=0");
+        Check(badLimit.StatusCode == HttpStatusCode.BadRequest, "an out-of-range history limit was accepted instead of rejected");
         await fixture.Send("DELETE", "api/history?userId=20");
         Check(contacts.Recent(20).Count == 0 && new BotProfileStore(fixture.Root).ListMemories(20).Count == 1, "raw deletion removed long notes");
         await fixture.Send("DELETE", "api/memories/" + id + "?userId=20");
@@ -244,6 +267,26 @@ public static class AdminHttpChecks
             (await fixture.Get("api/memories?userId=20")).GetArrayLength() == 1, "history deletion retained a candidate or removed approved notes");
     }
 
+    private static async Task HistoryImages()
+    {
+        await using var fixture = new Fixture();
+        var contacts = new ContactContextStore(fixture.Root);
+        var png = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+        contacts.AppendMessage(20, "user", "[图片]", "77");
+        contacts.SaveImage(20, "77", "image/png", png);
+        var history = await fixture.Get("api/history?userId=20&limit=10");
+        var entry = history.EnumerateArray().Single(item => item.GetProperty("messageId").GetString() == "77");
+        Check(entry.GetProperty("imageUrl").GetString() == "/api/history/20/images/77", "the history entry did not point at its stored image");
+        using var image = await fixture.Request("GET", "api/history/20/images/77");
+        Check(image.StatusCode == HttpStatusCode.OK && image.Content.Headers.ContentType?.MediaType == "image/png" &&
+            (await image.Content.ReadAsByteArrayAsync()).SequenceEqual(png), "the stored chat image was not served");
+        using var missing = await fixture.Request("GET", "api/history/20/images/78");
+        Check(missing.StatusCode == HttpStatusCode.NotFound, "an unknown chat image was answered");
+        using var anonymous = new HttpClient(new SocketsHttpHandler { UseProxy = false }) { BaseAddress = new Uri(fixture.Server.Prefix) };
+        using var denied = await anonymous.GetAsync("api/history/20/images/77");
+        Check(denied.StatusCode == HttpStatusCode.Unauthorized, "chat images were served without the panel token");
+    }
+
     private static async Task ReceivedImages()
     {
         var images = new FavoriteImage();
@@ -284,7 +327,7 @@ public static class AdminHttpChecks
                 "revoked source downloaded or imported an image");
         }
         await fixture.Send("PUT", "api/settings", original);
-        fixture.ImageClock.Now = fixture.ImageClock.Now.AddMinutes(10);
+        fixture.ImageClock.Now = fixture.ImageClock.Now.AddHours(25);
         Check((await fixture.Get("api/received-images")).GetArrayLength() == 0, "expired received image remained listed");
         using var expired = await fixture.Http.GetAsync("api/received-images/" + groupId + "/image");
         Check(expired.StatusCode == HttpStatusCode.BadRequest && images.Calls == calls, "expired candidate downloaded bytes");
@@ -298,7 +341,7 @@ public static class AdminHttpChecks
         images.After = null;
         await fixture.Send("PUT", "api/settings", original);
         var expiringId = fixture.AddReceived(messageId: 104);
-        images.After = () => fixture.ImageClock.Now = fixture.ImageClock.Now.AddMinutes(10);
+        images.After = () => fixture.ImageClock.Now = fixture.ImageClock.Now.AddHours(25);
         using var lateExpired = await fixture.Request("POST", "api/received-images/import", new
             { receivedId = expiringId, id = "late-expired", tags = Array.Empty<string>(), reuseApproved = true });
         Check(lateExpired.StatusCode == HttpStatusCode.BadRequest && new MemeLibrary(fixture.Root).List().Single().Id == "received",
@@ -310,14 +353,21 @@ public static class AdminHttpChecks
         await using var fixture = new Fixture();
         var original = GroupChatSettings.Load(Path.Combine(fixture.Root, "group-chat.local.json"));
         await fixture.Send("PUT", "api/settings", original with { PrivateIntervalSeconds = 3, PrivatePerHour = 60,
-            MentionIntervalSeconds = 3, MentionPerHour = 60, ActiveIntervalSeconds = 3, ActivePerHour = 120, ActiveGroupId = 10 });
+            MentionIntervalSeconds = 3, MentionPerHour = 60, ActiveIntervalSeconds = 3, ActivePerHour = 120, ActiveGroupId = 10,
+            ApiBudgetYuan = 5, MaxApiCalls = 50 });
         var saved = await fixture.Get("api/settings");
         Check(saved.GetProperty("privateIntervalSeconds").GetInt32() == 3 && saved.GetProperty("privatePerHour").GetInt32() == 60 &&
             saved.GetProperty("activePerHour").GetInt32() == 120, "relaxed rate settings not persisted");
+        Check(saved.GetProperty("apiBudgetYuan").GetDouble() == 5 && saved.GetProperty("maxApiCalls").GetInt32() == 50,
+            "adjustable deepseek budget was not persisted");
         Check((await fixture.Get("api/status")).GetProperty("restartRequired").GetBoolean(), "saved change not marked pending");
         Check(Directory.GetFiles(Path.Combine(fixture.Root, "Results/local"), "group-chat.panel-before-*.json").Length == 1, "settings backup missing");
         using var invalid = await fixture.Request("PUT", "api/settings", original with { SelfId = 100 });
         Check(invalid.StatusCode == HttpStatusCode.BadRequest && GroupChatSettings.Load(Path.Combine(fixture.Root, "group-chat.local.json")).SelfId == 99, "fixed account mutated");
+        using var unbounded = await fixture.Request("PUT", "api/settings", original with { ApiBudgetYuan = 1000 });
+        Check(unbounded.StatusCode == HttpStatusCode.BadRequest &&
+            GroupChatSettings.Load(Path.Combine(fixture.Root, "group-chat.local.json")).ApiBudgetYuan == 5,
+            "unbounded deepseek budget mutated the saved settings");
         foreach (var action in new[] { "pause", "resume", "apply" }) await fixture.Send("POST", "api/control", new { action });
         Check(fixture.Actions.SequenceEqual(new[] { "pause", "resume", "apply" }) && !(await fixture.Get("api/status")).GetProperty("restartRequired").GetBoolean(), "controls or applied state wrong");
         using var command = await fixture.Request("POST", "api/control", new { action = "run-command" });

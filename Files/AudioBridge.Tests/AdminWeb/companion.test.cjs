@@ -22,6 +22,7 @@ class Element {
   removeAttribute() {}
   reset() {}
   reportValidity() { return true; }
+  set innerHTML(value) { throw new Error("unsafe HTML sink used: " + value); }
 }
 function deferred() {
   let resolve, reject;
@@ -149,7 +150,7 @@ test("real console also clears a failed settings load on authentication expiry",
   assert.equal(app.$("settings-retry").disabled, false);
 });
 
-test("background task failures and success times render on overview and heart pages", async () => {
+test("legacy background failures retain uncertainty about whether the loop still runs", async () => {
   const app = appFixture(async () => response({ runtime: { running: true, backgroundTasks: [
     { name: "companion", state: "failed", lastSuccessAt: "2026-10-24T02:00:00Z", lastError: "ChatApiException" }
   ] } }));
@@ -157,8 +158,87 @@ test("background task failures and success times render on overview and heart pa
   for (const id of ["background-tasks", "companion-background-tasks"]) {
     const row = app.$(id).children[0];
     assert.match(row.children[0].textContent, /心脑/);
-    assert.equal(row.children[1].textContent, "失败");
+    assert.equal(row.children[1].textContent, "失败（旧版状态，运行情况待核对）");
     assert.match(row.children[2].textContent, /最近成功：.*ChatApiException/);
+    assert.doesNotMatch(row.children[2].textContent, /最近处理：/);
+  }
+});
+
+test("a failed message result keeps the loop running and shows its time and safe reason on both pages", async () => {
+  const app = appFixture(async () => response({ runtime: { running: true, backgroundTasks: [
+    { name: "message-worker", state: "running", lastSuccessAt: "2026-10-24T02:00:00Z", lastError: "InvalidDataException",
+      lastResult: "failed", lastResultAt: "2026-10-24T03:00:00Z", lastErrorCode: "model_invalid_output", lastErrorMessage: "模型回复格式无效，本次回复已丢弃。" }
+  ] } }));
+  await app.connect();
+  for (const id of ["background-tasks", "companion-background-tasks"]) {
+    const row = app.$(id).children[0];
+    assert.equal(row.children[0].textContent, "消息处理：");
+    assert.equal(row.children[1].textContent, "运行中");
+    assert.match(row.children[2].textContent, /最近处理：失败 · 最近处理时间：/);
+    assert.match(row.children[2].textContent, /原因：模型回复格式无效，本次回复已丢弃。/);
+    assert.doesNotMatch(row.children[2].textContent, /InvalidDataException/);
+  }
+});
+
+test("a failed loop lifecycle displays abnormal termination separately from its last result", async () => {
+  const app = appFixture(async () => response({ runtime: { running: true, backgroundTasks: [
+    { name: "companion", state: "failed", lastSuccessAt: null, lastError: "InvalidOperationException",
+      lastResult: "failed", lastResultAt: "2026-10-24T03:00:00Z", lastErrorCode: "background_loop_failed", lastErrorMessage: "后台循环异常退出，请检查本机诊断记录。" }
+  ] } }));
+  await app.connect();
+  for (const id of ["background-tasks", "companion-background-tasks"]) {
+    const row = app.$(id).children[0];
+    assert.equal(row.children[1].textContent, "已终止（异常）");
+    assert.match(row.children[2].textContent, /最近处理：失败/);
+    assert.match(row.children[2].textContent, /原因：后台循环异常退出/);
+  }
+});
+
+test("a later successful result clears the old failure reason and overview error", async () => {
+  let runtime = { running: true, lastError: "InvalidDataException", lastErrorMessage: "模型回复格式无效，本次回复已丢弃。", lastErrorAt: "2026-10-24T03:00:00Z",
+    backgroundTasks: [{ name: "message-worker", state: "running", lastResult: "failed", lastResultAt: "2026-10-24T03:00:00Z", lastErrorMessage: "模型回复格式无效，本次回复已丢弃。" }] };
+  const app = appFixture(async () => response({ runtime }));
+  await app.connect();
+  assert.equal(app.$("runtime-error").hidden, false);
+  assert.match(app.$("runtime-error").textContent, /最近一次回复失败：模型回复格式无效.*发生于/);
+  runtime = { running: true, lastError: null, lastErrorMessage: null, lastErrorAt: null,
+    backgroundTasks: [{ name: "message-worker", state: "running", lastResult: "succeeded", lastResultAt: "2026-10-24T03:01:00Z", lastSuccessAt: "2026-10-24T03:01:00Z", lastError: null, lastErrorMessage: null }] };
+  await app.$("refresh-button").emit("click");
+  assert.equal(app.$("runtime-error").hidden, true);
+  assert.equal(app.$("runtime-error").textContent, "");
+  for (const id of ["background-tasks", "companion-background-tasks"]) {
+    assert.equal(app.$(id).children.length, 1);
+    const row = app.$(id).children[0];
+    assert.equal(row.children[1].textContent, "运行中");
+    assert.match(row.children[2].textContent, /最近处理：成功/);
+    assert.doesNotMatch(row.children[2].textContent, /原因：|模型回复格式无效/);
+  }
+});
+
+test("stopped loops and new tasks without a completed result never imply success", async () => {
+  const app = appFixture(async () => response({ runtime: { running: true, backgroundTasks: [
+    { name: "companion", state: "stopped", lastResult: null, lastResultAt: null, lastSuccessAt: null, lastError: null }
+  ] } }));
+  await app.connect();
+  const row = app.$("background-tasks").children[0];
+  assert.equal(row.children[1].textContent, "已停止");
+  assert.match(row.children[2].textContent, /最近处理：尚无记录/);
+  assert.doesNotMatch(row.children[2].textContent, /最近处理时间|原因：/);
+});
+
+test("untrusted error fields remain literal text and never enter an HTML sink", async () => {
+  const attack = '<img src=x onerror="window.unwanted=true">';
+  const app = appFixture(async () => response({ runtime: { running: true, lastErrorMessage: attack, backgroundTasks: [
+    { name: "message-worker", state: "running", lastResult: "failed", lastResultAt: "2026-10-24T03:00:00Z", lastError: attack, lastErrorCode: attack, lastErrorMessage: attack },
+    { name: attack, state: "failed", lastError: attack }
+  ] } }));
+  await app.connect();
+  assert.equal(app.$("runtime-error").textContent, "最近一次回复失败：" + attack);
+  for (const id of ["background-tasks", "companion-background-tasks"]) {
+    const rows = app.$(id).children;
+    assert.ok(rows[0].children[2].textContent.includes("原因：" + attack));
+    assert.equal(rows[1].children[0].textContent, attack + "：");
+    assert.ok(rows[1].children[2].textContent.includes("最近错误类型：" + attack));
   }
 });
 

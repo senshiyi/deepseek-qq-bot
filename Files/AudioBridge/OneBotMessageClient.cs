@@ -15,6 +15,35 @@ public sealed record OneBotSegment(string Type, object Data)
         MemeImageFormat.Validate(bytes);
         return new("image", new { file = "base64://" + Convert.ToBase64String(bytes) });
     }
+    public static OneBotSegment Record(byte[] wav)
+    {
+        ArgumentNullException.ThrowIfNull(wav);
+        WaveForm.Validate(wav);
+        return new("record", new { file = "base64://" + Convert.ToBase64String(wav) });
+    }
+
+    /// <summary>引用回复：引用的是群/私聊里那条真实消息的 id，只能放在消息最前面。</summary>
+    public static OneBotSegment Reply(long messageId) => new("reply", new { id = messageId.ToString(CultureInfo.InvariantCulture) });
+}
+
+/// <summary>语音只接受本机合成的 16kHz/16位/单声道 PCM WAV，并限制在 60 秒以内。</summary>
+internal static class WaveForm
+{
+    public static void Validate(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length is < 45 || bytes.Length > OneBotMessageClient.MaximumVoiceBytes ||
+            !bytes.StartsWith("RIFF"u8) || !bytes.Slice(8, 4).SequenceEqual("WAVE"u8) ||
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[4..]) != bytes.Length - 8 ||
+            !bytes.Slice(12, 4).SequenceEqual("fmt "u8) ||
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[16..]) != 16 ||
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes[20..]) != 1 ||
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes[22..]) != 1 ||
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[24..]) != LocalSpeechSynthesis.SampleRate ||
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes[34..]) != 16 ||
+            !bytes.Slice(36, 4).SequenceEqual("data"u8) ||
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[40..]) != bytes.Length - 44)
+            throw new InvalidDataException("语音只接受 16kHz/16位/单声道且不超过 60 秒的 WAV。");
+    }
 }
 
 public sealed record OutgoingGroupMessage(string GroupId, IReadOnlyList<OneBotSegment> Segments);
@@ -31,6 +60,8 @@ public sealed class OneBotMessageException(string message, bool deliveryMayHaveO
 public sealed class OneBotMessageClient : IDisposable
 {
     public const int MaximumImageBytes = 5 * 1024 * 1024;
+    public const int MaximumVoicePcmBytes = LocalSpeechSynthesis.SampleRate * 2 * 60;
+    public const int MaximumVoiceBytes = 44 + MaximumVoicePcmBytes;
     public const int MaximumTextCharacters = 3000;
     public const int MaximumSegments = 4;
     private const int MaximumReplyBytes = 64 * 1024;
@@ -85,9 +116,10 @@ public sealed class OneBotMessageClient : IDisposable
     private static List<object> ValidateSegments(IReadOnlyList<OneBotSegment> messageSegments)
     {
         if (messageSegments is null || messageSegments.Count is < 1 or > MaximumSegments)
-            throw new ArgumentException("一条消息只允许 1～4 个 text/face/image 段。");
+            throw new ArgumentException("一条消息只允许 1～4 个 text/face/image/reply 段。");
         var textCount = 0;
         var imageBytes = 0;
+        var replies = 0;
         var segments = new List<object>();
         foreach (var segment in messageSegments)
         {
@@ -128,7 +160,31 @@ public sealed class OneBotMessageClient : IDisposable
                     if (imageBytes > MaximumImageBytes) throw new ArgumentException("每条消息的图片原始字节总计不得超过 5 MiB。");
                     clean = new { file = "base64://" + Convert.ToBase64String(bytes) };
                     break;
-                default: throw new ArgumentException("只允许 text、face、image 消息段。");
+                case "record":
+                    if (!data.TryGetProperty("file", out var voiceValue) || voiceValue.ValueKind != JsonValueKind.String)
+                        throw new ArgumentException("record 段仅接受已验证的本机合成语音。");
+                    var voice = voiceValue.GetString()!;
+                    if (!voice.StartsWith("base64://", StringComparison.Ordinal) || voice.Length - 9 > ((MaximumVoiceBytes + 2) / 3) * 4)
+                        throw new ArgumentException("record 段仅接受最多 60 秒的内联语音。");
+                    byte[] wav;
+                    try { wav = Convert.FromBase64String(voice[9..]); }
+                    catch (FormatException) { throw new ArgumentException("语音编码无效。"); }
+                    WaveForm.Validate(wav);
+                    if (messageSegments.Count != 1) throw new ArgumentException("一条语音消息不能混入文字、表情或图片。");
+                    clean = new { file = "base64://" + Convert.ToBase64String(wav) };
+                    break;
+                case "reply":
+                    if (!data.TryGetProperty("id", out var replyValue) || replyValue.ValueKind != JsonValueKind.String)
+                        throw new ArgumentException("reply 段必须提供有效的消息编号。");
+                    var reply = replyValue.GetString() ?? "";
+                    var digits = reply.StartsWith('-') ? reply[1..] : reply;
+                    if (digits.Length is < 1 or > 19 || !digits.All(char.IsAsciiDigit))
+                        throw new ArgumentException("reply 段必须提供有效的消息编号。");
+                    // 引用必须排在最前面，且一条消息只引用一条。
+                    if (++replies > 1 || segments.Count != 0) throw new ArgumentException("引用回复必须是最前面唯一的 reply 段。");
+                    clean = new { id = reply };
+                    break;
+                default: throw new ArgumentException("只允许 text、face、image、record、reply 消息段。");
             }
             segments.Add(new { type = segment.Type, data = clean });
         }
@@ -152,6 +208,41 @@ public sealed class OneBotMessageClient : IDisposable
         catch (ArgumentException) { throw Failure(false); }
     }
 
+    /// <summary>同意一条好友申请；flag 来自申请事件，只做格式校验后原样回传。</summary>
+    public async Task ApproveFriendRequestAsync(string flag, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(flag) || flag.Length > 256 || flag.Any(char.IsControl))
+            throw new ArgumentException("好友申请标识无效。");
+        using var reply = await CallAsync("set_friend_add_request", new { flag, approve = true }, false, ct, allowNullData: true).ConfigureAwait(false);
+    }
+
+    /// <summary>取一条收到的语音并让 NapCat 转成 WAV，只返回本机存在的绝对路径。</summary>
+    public async Task<string> GetRecordAsync(string file, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(file) || file.Length > 256 || file.Any(char.IsControl))
+            throw new ArgumentException("语音文件标识无效。");
+        using var reply = await CallAsync("get_record", new { file, out_format = "wav" }, false, ct).ConfigureAwait(false);
+        if (!reply.RootElement.GetProperty("data").TryGetProperty("file", out var value) || value.ValueKind != JsonValueKind.String)
+            throw Failure(false);
+        var path = value.GetString() ?? "";
+        if (path.Length is < 1 or > 512 || path.Any(char.IsControl) || !Path.IsPathFullyQualified(path) ||
+            !string.Equals(Path.GetExtension(path), ".wav", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+            throw new InvalidDataException("没有取得可读取的语音文件，可能在转换时失败了。");
+        return Path.GetFullPath(path);
+    }
+
+    /// <summary>空间发布只用 qzone.qq.com 这一个域名的登录 cookie；失败时不含任何凭证内容。</summary>
+    public async Task<string> GetQzoneCookiesAsync(CancellationToken ct)
+    {
+        using var reply = await CallAsync("get_cookies", new { domain = "qzone.qq.com" }, false, ct).ConfigureAwait(false);
+        if (!reply.RootElement.GetProperty("data").TryGetProperty("cookies", out var value) || value.ValueKind != JsonValueKind.String)
+            throw Failure(false);
+        var cookies = value.GetString() ?? "";
+        if (cookies.Length is < 1 or > 8192 || cookies.Any(c => char.IsControl(c)))
+            throw new InvalidDataException("空间登录凭证无效，未发送。");
+        return cookies;
+    }
+
     public async Task<OneBotOnlineStatus> GetStatusAsync(CancellationToken ct)
     {
         using var reply = await CallAsync("get_status", new { }, false, ct).ConfigureAwait(false);
@@ -162,7 +253,7 @@ public sealed class OneBotMessageClient : IDisposable
         return new(online.GetBoolean(), good.GetBoolean());
     }
 
-    private async Task<JsonDocument> CallAsync(string action, object body, bool sending, CancellationToken ct)
+    private async Task<JsonDocument> CallAsync(string action, object body, bool sending, CancellationToken ct, bool allowNullData = false)
     {
         ct.ThrowIfCancellationRequested();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -194,7 +285,7 @@ public sealed class OneBotMessageClient : IDisposable
             if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Select(x => x.Name).Distinct(StringComparer.Ordinal).Count() != root.EnumerateObject().Count() ||
                 !root.TryGetProperty("status", out var status) || status.ValueKind != JsonValueKind.String ||
                 status.GetString() != "ok" || !root.TryGetProperty("retcode", out var code) || !code.TryGetInt32(out var retcode) || retcode != 0 ||
-                !root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
+                !root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object && !(allowNullData && data.ValueKind == JsonValueKind.Null))
             { json.Dispose(); throw Failure(sending); }
             return json;
         }

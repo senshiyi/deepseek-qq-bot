@@ -10,10 +10,12 @@ public static class MessageClientChecks
         var checks = new (string Name, Func<Task> Run)[]
         {
             ("structured text/face/image sends with Bearer and exact receipt", Send),
+            ("quote replies put one reply segment first and reject other shapes", QuoteReply),
             ("private sends use the exact action, contact and validated segments", PrivateSend),
             ("private contact whitelist rejects before HTTP", PrivateScope),
             ("group and private whitelists remain independent", IndependentScopes),
             ("private failure receipts are uncertain and never retried", PrivateReceipts),
+            ("friend request approval posts one exact action and tolerates a null data payload", FriendApproval),
             ("login requires a valid positive self id", Login),
             ("connection status requires explicit Boolean online and good flags", OnlineStatus),
             ("only loopback HTTP root origins are allowed", Origins),
@@ -52,6 +54,50 @@ public static class MessageClientChecks
         using var client = Client(handler);
         var receipt = await client.SendGroupAsync(new("123", [OneBotSegment.Text("[CQ:at,qq=all]你好"), OneBotSegment.Face(14), OneBotSegment.Image(MemeLibraryChecks.Png)]), default);
         Check(receipt.MessageId == "-42" && calls == 1, "send receipt or count wrong");
+    }
+
+    private static async Task QuoteReply()
+    {
+        var handler = new Handler(async (request, _) =>
+        {
+            using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            var message = json.RootElement.GetProperty("message");
+            Check(message.GetArrayLength() == 2 && message[0].GetProperty("type").GetString() == "reply" &&
+                message[0].GetProperty("data").GetProperty("id").GetString() == "-7" &&
+                message[1].GetProperty("type").GetString() == "text", "quote reply was not serialized first");
+            return Reply("{\"status\":\"ok\",\"retcode\":0,\"data\":{\"message_id\":11}}");
+        });
+        using var client = Client(handler);
+        await client.SendGroupAsync(new("123", [OneBotSegment.Reply(-7), OneBotSegment.Text("收到")]), default);
+        foreach (var segments in new OneBotSegment[][]
+        {
+            [OneBotSegment.Text("收到"), OneBotSegment.Reply(7)],
+            [OneBotSegment.Reply(7), OneBotSegment.Reply(8), OneBotSegment.Text("收到")],
+            [new OneBotSegment("reply", new { id = "abc" }), OneBotSegment.Text("收到")],
+            [new OneBotSegment("reply", new { id = 7 }), OneBotSegment.Text("收到")],
+            [new OneBotSegment("reply", new { qq = "7" }), OneBotSegment.Text("收到")]
+        })
+            await RejectAsync(() => client.SendGroupAsync(new("123", segments), default));
+    }
+
+    private static async Task FriendApproval()
+    {
+        var handler = new Handler(async (request, _) =>
+        {
+            Check(request.RequestUri?.ToString() == "http://127.0.0.1:3000/set_friend_add_request", "wrong friend request action");
+            using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            Check(json.RootElement.GetProperty("flag").GetString() == "flag-7" && json.RootElement.GetProperty("approve").GetBoolean(),
+                "friend request body changed");
+            return Reply("{\"status\":\"ok\",\"retcode\":0,\"data\":null}");
+        });
+        using var client = Client(handler);
+        await client.ApproveFriendRequestAsync("flag-7", default);
+        Check(handler.Calls == 1, "friend approval was not sent once");
+        foreach (var flag in new[] { "", " ", new string('x', 257), "a\0b" })
+            await RejectAsync(() => client.ApproveFriendRequestAsync(flag, default));
+        using var rejected = Client(new Handler((_, _) => Task.FromResult(Reply("{\"status\":\"failed\",\"retcode\":200,\"data\":null}"))));
+        try { await rejected.ApproveFriendRequestAsync("flag-7", default); throw new Exception("failed friend approval was accepted"); }
+        catch (OneBotMessageException) { }
     }
 
     private static async Task Login()

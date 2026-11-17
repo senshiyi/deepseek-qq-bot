@@ -37,6 +37,34 @@ public static class PersonaLearning
 
         var baseHash = HashPersona(current);
         var prompt = BuildPrompt(current);
+        // 模型偶尔会回 Markdown 或多余字段：格式不对就重试一次，别把这点小概率错误丢给管理员手动点。
+        PersonaSettings? proposed = null;
+        InvalidDataException? unparseable = null;
+        for (var attempt = 0; attempt < 2 && proposed is null; attempt++)
+        {
+            var output = await ReadAsync(replyFactory, prompt, source, ct).ConfigureAwait(false);
+            try { proposed = ParseProposal(output, current); }
+            catch (InvalidDataException error) { unparseable = error; }
+        }
+        if (proposed is null) throw unparseable!;
+        {
+            ct.ThrowIfCancellationRequested();
+            var changed = new[]
+            {
+                ("名字", current.Name != proposed.Name), ("性格", current.Personality != proposed.Personality),
+                ("称呼", current.UserAddress != proposed.UserAddress), ("说话风格", current.SpeakingStyle != proposed.SpeakingStyle)
+            }.Where(item => item.Item2).Select(item => item.Item1).ToArray();
+            var summary = changed.Length == 0 ? "草稿与当前角色设定相同，未自动保存。"
+                : "建议调整：" + string.Join("、", changed) + "。须确认后生效；草稿可能不准确，请先检查。";
+            return new(baseHash, current, proposed, userId, source.Count, source[0].At, source[^1].At,
+                timestamp, summary);
+        }
+    }
+
+    /// <summary>一次模型调用：只负责把输出限量和收全，格式问题交给调用方决定是否重试。</summary>
+    private static async Task<string> ReadAsync(Func<string, IStreamingReply> replyFactory, string prompt,
+        IReadOnlyList<HistoryExcerpt> source, CancellationToken ct)
+    {
         var reply = replyFactory(prompt) ?? throw new InvalidOperationException("角色提取服务不可用。");
         var output = new StringBuilder();
         try
@@ -52,17 +80,7 @@ public static class PersonaLearning
                 output.Append(chunk);
             }
             ct.ThrowIfCancellationRequested();
-            var proposed = ParseProposal(output.ToString(), current);
-            ct.ThrowIfCancellationRequested();
-            var changed = new[]
-            {
-                ("名字", current.Name != proposed.Name), ("性格", current.Personality != proposed.Personality),
-                ("称呼", current.UserAddress != proposed.UserAddress), ("说话风格", current.SpeakingStyle != proposed.SpeakingStyle)
-            }.Where(item => item.Item2).Select(item => item.Item1).ToArray();
-            var summary = changed.Length == 0 ? "草稿与当前角色设定相同，未自动保存。"
-                : "建议调整：" + string.Join("、", changed) + "。须确认后生效；草稿可能不准确，请先检查。";
-            return new(baseHash, current, proposed, userId, source.Count, source[0].At, source[^1].At,
-                timestamp, summary);
+            return output.ToString();
         }
         finally
         {

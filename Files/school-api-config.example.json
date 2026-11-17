@@ -6,5 +6,6 @@
   "maxPoints": null,
   "maxCalls": null,
   "stream": false,
+  "resolveIp": null,
   "visionModel": "qwen3.8-27b"
 }

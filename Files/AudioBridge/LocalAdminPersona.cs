@@ -36,7 +36,8 @@ public sealed partial class LocalAdminServer
             { await JsonAsync(context.Response, new { error = "已有一项人格草稿正在生成，请等待完成。" }, 409, ct); return; }
             try
             {
-                var current = profiles.GetPersona();
+                // 草稿基于该联系人此刻实际使用的人格；确认后写入他的专属人格，不动全局角色。
+                var current = profiles.EffectivePersona(userId);
                 var history = contacts.Recent(userId, 1000);
                 var draft = await PersonaLearning.GenerateAsync(current, userId, history, personaReplyFactory, ct);
                 ct.ThrowIfCancellationRequested();
@@ -60,6 +61,7 @@ public sealed partial class LocalAdminServer
             var id = body.GetProperty("draftId").GetString() ?? "";
             PersonaSettings value;
             bool saved;
+            long target;
             lock (personaDraftGate)
             {
                 PurgePersonaDrafts();
@@ -76,15 +78,21 @@ public sealed partial class LocalAdminServer
                 };
                 value.Validate();
                 ct.ThrowIfCancellationRequested();
-                saved = profiles.TrySavePersona(value, draft.BasePersonaHash);
+                target = draft.UserId;
+                saved = profiles.TrySaveContactPersona(
+                    new ContactPersona(draft.UserId, value.Name, value.Personality, value.UserAddress, value.SpeakingStyle),
+                    draft.BasePersonaHash);
                 if (saved) personaDrafts.Remove(id);
             }
             if (!saved)
-            { await JsonAsync(context.Response, new { error = "角色在生成草稿后已被修改；为保护新修改，本次未保存，请重新生成。" }, 409, ct); return; }
+            { await JsonAsync(context.Response, new { error = "这位联系人的角色在生成草稿后已被修改；为保护新修改，本次未保存，请重新生成。" }, 409, ct); return; }
             MarkDirty();
-            await JsonAsync(context.Response, value, 200, ct);
+            // 草稿保存的是这位联系人的专属人格；全局角色不受影响。
+            await JsonAsync(context.Response, new { userId = target, persona = profiles.GetContactPersona(target),
+                effective = profiles.EffectivePersona(target) }, 200, ct);
             return;
         }
         context.Response.StatusCode = 404;
     }
+
 }

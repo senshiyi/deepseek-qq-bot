@@ -42,7 +42,7 @@ public static class GroupMessageCommands
         if (command == "chat-ai-check")
         {
             var key = BotSettings.LoadApiKey(project) ?? throw new InvalidOperationException("请在本地.env配置DEEPSEEK_API_KEY。");
-            var budget = new ApiBudget(Path.Combine(project, "Results/local/deepseek-budget.json"), .30, 10);
+            var budget = new ApiBudget(Path.Combine(project, "Results/local/deepseek-budget.json"), settings.ApiBudgetYuan, settings.MaxApiCalls);
             var list = memes.List();
             var prompt = GroupChatBrain.SystemPrompt(list.Select(m => (m.Id, m.Tags)), settings.ParsedMode());
             var brain = new GroupChatBrain(_ => new DeepSeekReply(key, budget, systemPrompt: prompt, jsonMode: true), list.Select(m => m.Id));
